@@ -14,28 +14,10 @@ logger = logging.getLogger(__name__)
 
 # In-package indicators (no need to scan filesystem for default set)
 from app.indicators.base import IndicatorBase
-from app.indicators.permutation_entropy import PermutationEntropy
-from app.indicators.sample_entropy import SampleEntropy
-from app.indicators.realized_kurtosis import RealizedKurtosis
-from app.indicators.jump_share import JumpShare
 from app.indicators.vol_of_vol import VolOfVol
-from app.indicators.amihud import AmihudIlliquidity
-from app.indicators.efficiency_ratio import EfficiencyRatio
-from app.indicators.down_up_vol import DownUpVolAsymmetry
-from app.indicators.composite_stress import CompositeStressIndex
-from app.indicators.liquidation_pressure import LiquidationPressure
 
 BUILTIN_INDICATORS: List[type["IndicatorBase"]] = [
-    PermutationEntropy,
-    SampleEntropy,
-    RealizedKurtosis,
-    JumpShare,
     VolOfVol,
-    AmihudIlliquidity,
-    EfficiencyRatio,
-    DownUpVolAsymmetry,
-    CompositeStressIndex,
-    LiquidationPressure,
 ]
 
 
