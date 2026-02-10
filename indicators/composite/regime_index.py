@@ -182,7 +182,7 @@ class RegimeIndex(IndicatorBase):
             return ({"regime": [], "regime_fast": [], "regime_slow": []}, None)
 
         norm_window = max(2, int(self.parameters.get("norm_window", INDEX_WINDOW)))
-        min_components = max(1, min(7, int(self.parameters.get("min_components", 1))))
+        min_components = max(1, min(8, int(self.parameters.get("min_components", 1))))
         fast_ema_period = max(1, min(30, int(self.parameters.get("fast_ema_period", 20))))
         slow_ema_period = max(1, min(300, int(self.parameters.get("slow_ema_period", 200))))
         w_stress = float(self.parameters.get("w_stress", 0.6))
@@ -197,22 +197,26 @@ class RegimeIndex(IndicatorBase):
         hurst_raw = _get_primary_series(indicator_series, "rolling_hurst")
         pe_raw = _get_primary_series(indicator_series, "perm_entropy")
         mdd_raw = _get_primary_series(indicator_series, "rolling_max_drawdown")
+        
 
+        mdd_pain_raw = [(t, abs(v)) for t, v in mdd_raw if math.isfinite(v)]
         lengths = [len(s) for s in [vov_raw, kurt_raw, amihud_raw, ui_raw, asym_raw, hurst_raw, pe_raw] if s]
         effective_norm = min(norm_window, max(10, min(lengths) // 2)) if lengths else norm_window
 
         vov_pct = _rolling_percentile(vov_raw, effective_norm)
+        mdd_pct = _rolling_percentile(mdd_pain_raw, effective_norm)
         kurt_pct = _rolling_percentile(kurt_raw, effective_norm)
         amihud_pct = _rolling_percentile(amihud_raw, effective_norm)
         ui_pct = _rolling_percentile(ui_raw, effective_norm)
         asym_pct = _rolling_percentile(asym_raw, effective_norm)
         hurst_pct = _rolling_percentile(hurst_raw, effective_norm)
-        pe_raw_pct = _rolling_percentile(pe_raw, effective_norm)
-        one_minus_pe_pct = [(t, 1.0 - p) for t, p in pe_raw_pct]
+        one_minus_pe_raw = [(t, 1.0 - v) for t, v in pe_raw if math.isfinite(v)]
+        one_minus_pe_pct = _rolling_percentile(one_minus_pe_raw, effective_norm)
+
 
         # Union of all timestamps in ms (normalize again in case any dependency used seconds)
         all_ts_set: set[int] = set()
-        for lst in [vov_pct, kurt_pct, amihud_pct, ui_pct, asym_pct, hurst_pct, one_minus_pe_pct]:
+        for lst in [vov_pct, kurt_pct, amihud_pct, ui_pct, mdd_pct, asym_pct, hurst_pct, one_minus_pe_pct]:
             for t, _ in lst:
                 all_ts_set.add(_ts_ms(t))
         all_ts = sorted(all_ts_set)
@@ -223,6 +227,7 @@ class RegimeIndex(IndicatorBase):
                 "kurt": kurt_pct,
                 "amihud": amihud_pct,
                 "ui": ui_pct,
+                "mdd": mdd_pct,
                 "asym": asym_pct,
                 "hurst": hurst_pct,
                 "one_pe": one_minus_pe_pct,
@@ -236,10 +241,11 @@ class RegimeIndex(IndicatorBase):
             kurt = aligned["kurt"].get(t)
             amihud = aligned["amihud"].get(t)
             ui = aligned["ui"].get(t)
+            mdd = aligned["mdd"].get(t)
             asym = aligned["asym"].get(t)
             hurst = aligned["hurst"].get(t)
             one_pe = aligned["one_pe"].get(t)
-            vals = [vov, kurt, amihud, ui, asym, hurst, one_pe]
+            vals = [vov, kurt, amihud, ui, mdd, asym, hurst, one_pe]
             n_present = sum(1 for v in vals if v is not None and math.isfinite(v))
             if n_present < min_components:
                 continue
@@ -247,12 +253,13 @@ class RegimeIndex(IndicatorBase):
             kurt = kurt if kurt is not None and math.isfinite(kurt) else NEUTRAL
             amihud = amihud if amihud is not None and math.isfinite(amihud) else NEUTRAL
             ui = ui if ui is not None and math.isfinite(ui) else NEUTRAL
+            mdd = mdd if mdd is not None and math.isfinite(mdd) else NEUTRAL
             asym = asym if asym is not None and math.isfinite(asym) else NEUTRAL
             hurst = hurst if hurst is not None and math.isfinite(hurst) else NEUTRAL
             one_pe = one_pe if one_pe is not None and math.isfinite(one_pe) else NEUTRAL
             stress = (vov + kurt + amihud + ui) / 4.0
             structure = (one_pe + hurst) / 2.0
-            downside = asym
+            downside = (asym + mdd) / 2.0
             ri = w_stress * stress + w_downside * downside + w_anti_structure * (1.0 - structure)
             if math.isfinite(ri):
                 ri = max(0.0, min(1.0, ri))

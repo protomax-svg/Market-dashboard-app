@@ -98,6 +98,8 @@ class MainWindow(QMainWindow):
         self._layout_restored = False
         self._startup_in_progress = True  # guard: skip indicator refresh during restore
         self._refresh_pending = False  # coalesce multiple refresh triggers
+        self._last_regime_index_update_ms = 0  # track last regime_index update for throttling
+        self.REGIME_INDEX_REFRESH_INTERVAL_MS = 15 * 60 * 1000  # 15 minutes
 
         self._build_central_tabs()  # Candlestick + all indicators in center, fill space
         self._refresh_timer = QTimer(self)
@@ -134,6 +136,8 @@ class MainWindow(QMainWindow):
             self.retention_done.disconnect(self._on_retention_done)
         except Exception:
             pass
+        # Reset regime_index timer so it updates on first refresh after startup
+        self._last_regime_index_update_ms = 0
         QTimer.singleShot(500, self._schedule_refresh_all_indicators)
 
     def _build_menus(self) -> None:
@@ -422,11 +426,14 @@ class MainWindow(QMainWindow):
         end_ms = int(time.time() * 1000)
 
         # Refresh regime panel (one big chart) with its own display days
+        # Throttle: update only if 15 minutes have passed since last update
         if self._regime_panel is not None:
-            regime_days = self._regime_panel.get_display_days()
-            regime_days_ms = regime_days * 24 * 60 * 60 * 1000
-            regime_start_ms = end_ms - regime_days_ms
-            self._refresh_one_indicator(REGIME_INDICATOR_ID, self._regime_panel, regime_start_ms, end_ms, symbol)
+            if end_ms - self._last_regime_index_update_ms >= self.REGIME_INDEX_REFRESH_INTERVAL_MS:
+                regime_days = self._regime_panel.get_display_days()
+                regime_days_ms = regime_days * 24 * 60 * 60 * 1000
+                regime_start_ms = end_ms - regime_days_ms
+                self._refresh_one_indicator(REGIME_INDICATOR_ID, self._regime_panel, regime_start_ms, end_ms, symbol)
+                self._last_regime_index_update_ms = end_ms
 
         for indicator_id, panel in self._indicator_panels.items():
             if panel is None:
