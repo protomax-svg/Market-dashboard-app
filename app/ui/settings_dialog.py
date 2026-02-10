@@ -78,6 +78,9 @@ class SettingsDialog(QDialog):
 
         g_candle = QGroupBox("Candles")
         fl4 = QFormLayout(g_candle)
+        self.candle_start_date = QLineEdit(self.config.get("candle_start_date", ""))
+        self.candle_start_date.setPlaceholderText("2025-01-01")
+        fl4.addRow("Download candles from date:", self.candle_start_date)
         self.candle_poll = QSpinBox()
         self.candle_poll.setRange(10, 600)
         self.candle_poll.setValue(int(self.config.get("candle_poll_interval_sec", 60)))
@@ -105,5 +108,6 @@ class SettingsDialog(QDialog):
         out["retention_size_gb"] = self.retention_size_gb.value()
         out["ngrok_liquidations_url"] = self.ngrok_url.text().strip()
         out["liquidations_reconnect_delay_sec"] = self.reconnect_delay.value()
+        out["candle_start_date"] = self.candle_start_date.text().strip()
         out["candle_poll_interval_sec"] = self.candle_poll.value()
         return out

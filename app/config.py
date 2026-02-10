@@ -20,7 +20,8 @@ DEFAULTS = {
     "ngrok_liquidations_url": "",
     "liquidations_reconnect_delay_sec": 5,
     "candle_poll_interval_sec": 60,
-    "date_range_days": 30,
+    "candle_start_date": "",  # YYYY-MM-DD: download candles from this date to now (empty = 90 days ago)
+    "date_range_days": 90,
 }
 
 
@@ -55,3 +56,11 @@ def save_config(config: Dict[str, Any], path: Optional[str] = None) -> None:
 def get_db_path(config: Dict[str, Any]) -> str:
     sp = config.get("storage_path") or DEFAULT_STORAGE_PATH
     return os.path.join(sp, "marketmetrics.db")
+
+
+def get_custom_indicators_dir(config: Dict[str, Any]) -> str:
+    """Return <storage_path>/custom_indicators/; ensure it exists."""
+    sp = config.get("storage_path") or DEFAULT_STORAGE_PATH
+    path = os.path.join(sp, "custom_indicators")
+    ensure_storage_dir(path)
+    return path

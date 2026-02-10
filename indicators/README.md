@@ -1,6 +1,8 @@
-# User indicator plugins
+# User indicator plugins (project)
 
 Drop a new Python module file here to add custom indicators. The app discovers any class that subclasses `IndicatorBase` from `app.indicators.base`.
+
+**Hot reload:** Use **Indicators → Reload Indicators** to re-scan and reload plugins without restarting the app. **Indicators → Open Indicators Folder** opens the user plugin directory (`<storage_path>/custom_indicators/`), which is also scanned on startup and reload.
 
 **Example** (`indicators/my_custom.py`):
 
@@ -28,4 +30,4 @@ class MyCustom(IndicatorBase):
         return ({"value": out}, None)
 ```
 
-Restart the app to see the new indicator in the **Indicators** menu and as a dock panel.
+Use **Indicators → Reload Indicators** to see the new indicator immediately, or restart the app.

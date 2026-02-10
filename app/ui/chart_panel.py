@@ -1,25 +1,31 @@
 """
 Generic chart panel (PyQtGraph) for one indicator: one or more timeseries.
+Includes timeframe selector (1m, 5m, 15m, 1h).
 """
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy, QComboBox, QLabel
+from PySide6.QtCore import Qt, Signal
 import pyqtgraph as pg
+from pyqtgraph.graphicsItems.DateAxisItem import DateAxisItem
 
-from app.ui.theme import BG_PANEL, TEXT, MUTED, ACCENT, BORDER
+from app.ui.theme import BG_PANEL, TEXT, ACCENT, BORDER
+
+TIMEFRAMES = ["1m", "5m", "15m", "1h"]
 
 
 def _apply_dark_style(plot: pg.PlotItem) -> None:
     plot.getViewBox().setBackgroundColor(BG_PANEL)
     plot.showGrid(x=True, y=True, alpha=0.2)
     for ax in ("left", "bottom"):
-        pen = pg.mkPen(MUTED, width=1)
+        pen = pg.mkPen(TEXT, width=1)
         plot.getAxis(ax).setPen(pen)
         plot.getAxis(ax).setTextPen(TEXT)
 
 
 class ChartPanel(QWidget):
+    timeframe_changed = Signal(str)
+
     def __init__(
         self,
         indicator_id: str,
@@ -32,12 +38,38 @@ class ChartPanel(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
-        self.plot = pg.PlotItem(background=BG_PANEL)
+
+        # Toolbar: TF selector
+        toolbar = QHBoxLayout()
+        tf_label = QLabel("TF:")
+        tf_label.setStyleSheet(f"color: {TEXT};")
+        toolbar.addWidget(tf_label)
+        self._tf_combo = QComboBox(self)
+        self._tf_combo.addItems(TIMEFRAMES)
+        self._tf_combo.setCurrentText("1m")
+        self._tf_combo.currentTextChanged.connect(self._on_tf_changed)
+        toolbar.addWidget(self._tf_combo)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        # X-axis as date/time (Unix timestamp in seconds)
+        date_axis = DateAxisItem(orientation="bottom")
+        self.plot = pg.PlotItem(background=BG_PANEL, axisItems={"bottom": date_axis})
         _apply_dark_style(self.plot)
         self.plot_win = pg.PlotWidget(plotItem=self.plot, parent=self)
         layout.addWidget(self.plot_win)
         self._curves: Dict[str, pg.PlotDataItem] = {}
         self._colors = [ACCENT, "#34d399", "#6ee7b7", "#a7f3d0"]
+
+    def _on_tf_changed(self, tf: str) -> None:
+        self.timeframe_changed.emit(tf)
+
+    def get_timeframe(self) -> str:
+        return self._tf_combo.currentText()
+
+    def set_timeframe(self, tf: str) -> None:
+        if tf in TIMEFRAMES:
+            self._tf_combo.setCurrentText(tf)
 
     def set_data(self, series: Dict[str, List[Tuple[int, float]]]) -> None:
         for key, curve in list(self._curves.items()):

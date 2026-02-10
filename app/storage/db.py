@@ -15,6 +15,8 @@ INTERVAL_MS = {
     "1h": 3_600_000,
 }
 
+CANDLE_TABLES = ("1m", "5m", "15m", "1h")  # timeframes stored in separate tables
+
 
 def _utc_now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -33,15 +35,17 @@ class Database:
     def _init_schema(self) -> None:
         with self._lock:
             with self._conn() as c:
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS candles_1m (
-                        symbol TEXT NOT NULL,
-                        open_time INTEGER NOT NULL,
-                        open REAL, high REAL, low REAL, close REAL, volume REAL,
-                        PRIMARY KEY (symbol, open_time)
-                    )
-                """)
-                c.execute("CREATE INDEX IF NOT EXISTS idx_candles_1m_time ON candles_1m(symbol, open_time)")
+                for tf in CANDLE_TABLES:
+                    table = f"candles_{tf}"
+                    c.execute(f"""
+                        CREATE TABLE IF NOT EXISTS {table} (
+                            symbol TEXT NOT NULL,
+                            open_time INTEGER NOT NULL,
+                            open REAL, high REAL, low REAL, close REAL, volume REAL,
+                            PRIMARY KEY (symbol, open_time)
+                        )
+                    """)
+                    c.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_time ON {table}(symbol, open_time)")
                 c.execute("""
                     CREATE TABLE IF NOT EXISTS liquidations_1m (
                         symbol TEXT NOT NULL,
@@ -65,23 +69,50 @@ class Database:
                 c.execute("CREATE INDEX IF NOT EXISTS idx_metrics_time ON metrics(symbol, timeframe, timestamp)")
                 c.commit()
 
-    def get_last_candle_time_ms(self, symbol: str) -> Optional[int]:
+    def _candle_table(self, timeframe: str) -> str:
+        if timeframe not in CANDLE_TABLES:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
+        return f"candles_{timeframe}"
+
+    def get_last_candle_time_ms(self, symbol: str, timeframe: str = "1m") -> Optional[int]:
+        table = self._candle_table(timeframe)
         with self._lock:
             with self._conn() as c:
                 r = c.execute(
-                    "SELECT MAX(open_time) FROM candles_1m WHERE symbol = ?",
+                    f"SELECT MAX(open_time) FROM {table} WHERE symbol = ?",
                     (symbol,),
                 ).fetchone()
                 return r[0] if r and r[0] is not None else None
 
-    def insert_candles_1m(self, symbol: str, rows: List[Dict[str, Any]]) -> None:
+    def get_first_candle_time_ms(self, symbol: str, timeframe: str = "1m") -> Optional[int]:
+        """Earliest (minimum) open_time for this symbol/timeframe. None if no data."""
+        table = self._candle_table(timeframe)
+        with self._lock:
+            with self._conn() as c:
+                r = c.execute(
+                    f"SELECT MIN(open_time) FROM {table} WHERE symbol = ?",
+                    (symbol,),
+                ).fetchone()
+                return r[0] if r and r[0] is not None else None
+
+    def clear_all_candles(self, symbol: str) -> None:
+        """Delete all candle data for the symbol from every timeframe table. Call before full re-backfill."""
+        with self._lock:
+            with self._conn() as c:
+                for tf in CANDLE_TABLES:
+                    table = self._candle_table(tf)
+                    c.execute(f"DELETE FROM {table} WHERE symbol = ?", (symbol,))
+                c.commit()
+
+    def insert_candles(self, symbol: str, timeframe: str, rows: List[Dict[str, Any]]) -> None:
         if not rows:
             return
+        table = self._candle_table(timeframe)
         with self._lock:
             with self._conn() as c:
                 for r in rows:
                     c.execute(
-                        """INSERT OR REPLACE INTO candles_1m
+                        f"""INSERT OR REPLACE INTO {table}
                            (symbol, open_time, open, high, low, close, volume)
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
                         (
@@ -93,19 +124,26 @@ class Database:
                     )
                 c.commit()
 
-    def get_candles_1m(
+    def insert_candles_1m(self, symbol: str, rows: List[Dict[str, Any]]) -> None:
+        """Legacy: insert into 1m table. Prefer insert_candles(symbol, '1m', rows)."""
+        self.insert_candles(symbol, "1m", rows)
+
+    def get_candles(
         self,
         symbol: str,
+        timeframe: str,
         start_ms: int,
         end_ms: int,
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
+        """Load candles for the given timeframe from the API-backed table (1m, 5m, 15m, 1h)."""
+        table = self._candle_table(timeframe)
         with self._lock:
             with self._conn() as c:
                 c.row_factory = sqlite3.Row
-                q = """
+                q = f"""
                     SELECT open_time, open, high, low, close, volume
-                    FROM candles_1m WHERE symbol = ? AND open_time >= ? AND open_time <= ?
+                    FROM {table} WHERE symbol = ? AND open_time >= ? AND open_time <= ?
                     ORDER BY open_time
                 """
                 args: Tuple[Any, ...] = (symbol, start_ms, end_ms)
@@ -122,6 +160,16 @@ class Database:
                     for row in cur.fetchall()
                 ]
 
+    def get_candles_1m(
+        self,
+        symbol: str,
+        start_ms: int,
+        end_ms: int,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Legacy: get 1m candles. Prefer get_candles(symbol, '1m', start_ms, end_ms)."""
+        return self.get_candles(symbol, "1m", start_ms, end_ms, limit=limit)
+
     def resample_candles(
         self,
         symbol: str,
@@ -129,13 +177,14 @@ class Database:
         end_ms: int,
         timeframe: str,
     ) -> List[Dict[str, Any]]:
-        """Resample 1m candles to given timeframe (5m, 15m, 1h). Aligned to candle boundaries."""
+        """Return candles for timeframe. Prefer native API-backed tables; fallback: resample from 1m."""
+        if timeframe in CANDLE_TABLES:
+            return self.get_candles(symbol, timeframe, start_ms, end_ms)
         interval_ms = INTERVAL_MS.get(timeframe)
         if not interval_ms:
             return []
-        # align start to timeframe boundary
         start_aligned = (start_ms // interval_ms) * interval_ms
-        rows = self.get_candles_1m(symbol, start_aligned, end_ms, limit=None)
+        rows = self.get_candles(symbol, "1m", start_aligned, end_ms, limit=None)
         if not rows:
             return []
         out: List[Dict[str, Any]] = []
@@ -261,8 +310,10 @@ class Database:
         deleted = 0
         with self._lock:
             with self._conn() as c:
-                cur = c.execute("DELETE FROM candles_1m WHERE open_time < ?", (cutoff_ms,))
-                deleted += cur.rowcount
+                for tf in CANDLE_TABLES:
+                    table = self._candle_table(tf)
+                    cur = c.execute(f"DELETE FROM {table} WHERE open_time < ?", (cutoff_ms,))
+                    deleted += cur.rowcount
                 cur = c.execute("DELETE FROM liquidations_1m WHERE open_time < ?", (cutoff_ms,))
                 deleted += cur.rowcount
                 cur = c.execute("DELETE FROM metrics WHERE timestamp < ?", (cutoff_ms,))
@@ -277,22 +328,27 @@ class Database:
         with self._lock:
             with self._conn() as c:
                 while self.get_db_size_bytes() > max_bytes:
-                    # get oldest open_time across candles and liquidations
-                    r = c.execute("SELECT MIN(open_time) FROM candles_1m").fetchone()
-                    t_c = r[0] if r and r[0] is not None else None
+                    mins = []
+                    for tf in CANDLE_TABLES:
+                        table = self._candle_table(tf)
+                        r = c.execute(f"SELECT MIN(open_time) FROM {table}").fetchone()
+                        if r and r[0] is not None:
+                            mins.append(r[0])
                     r = c.execute("SELECT MIN(open_time) FROM liquidations_1m").fetchone()
-                    t_l = r[0] if r and r[0] is not None else None
+                    if r and r[0] is not None:
+                        mins.append(r[0])
                     r = c.execute("SELECT MIN(timestamp) FROM metrics").fetchone()
-                    t_m = r[0] if r and r[0] is not None else None
-                    mins = [x for x in (t_c, t_l, t_m) if x is not None]
+                    if r and r[0] is not None:
+                        mins.append(r[0])
                     if not mins:
                         break
                     cutoff = min(mins)
-                    # delete one "slice" (e.g. oldest 1000 minutes ~ 16h)
                     step = 1000 * 60 * 1000  # 1000 minutes in ms
                     end_cut = cutoff + step
-                    cur = c.execute("DELETE FROM candles_1m WHERE open_time < ?", (end_cut,))
-                    deleted += cur.rowcount
+                    for tf in CANDLE_TABLES:
+                        table = self._candle_table(tf)
+                        cur = c.execute(f"DELETE FROM {table} WHERE open_time < ?", (end_cut,))
+                        deleted += cur.rowcount
                     cur = c.execute("DELETE FROM liquidations_1m WHERE open_time < ?", (end_cut,))
                     deleted += cur.rowcount
                     cur = c.execute("DELETE FROM metrics WHERE timestamp < ?", (end_cut,))

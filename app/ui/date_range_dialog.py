@@ -17,7 +17,7 @@ from app.ui.theme import STYLESHEET
 
 
 class DateRangeDialog(QDialog):
-    def __init__(self, current_days: int = 30, parent=None):
+    def __init__(self, current_days: int = 90, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Date Range")
         self.setStyleSheet(STYLESHEET)

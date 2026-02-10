@@ -1,18 +1,18 @@
 """
-Dark theme only — ChatGPT-style colors.
+Light gray theme — neutral, easy on the eyes.
 """
-# Background: near-black / charcoal
-BG_DARK = "#0f1115"
-BG_MAIN = "#111827"
+# Background: light gray
+BG_DARK = "#595959"
+BG_MAIN = "#828282"
 # Panels: slightly lighter
-BG_PANEL = "#151a23"
-# Borders: subtle
-BORDER = "#243040"
-# Text
-TEXT = "#e5e7eb"
-MUTED = "#9ca3af"
-# Accent: green/teal
-ACCENT = "#10a37f"
+BG_PANEL = "#525252"
+# Borders: medium gray
+BORDER = "#303030"
+# Text: dark gray (readable on light)
+TEXT = "#bbbbbd"
+MUTED = "#303030"
+# Accent: teal/green
+ACCENT = "#09e39f"
 
 STYLESHEET = f"""
 QMainWindow, QWidget {{
@@ -107,7 +107,7 @@ QGroupBox::title {{
     subcontrol-origin: margin;
     left: 10px;
     padding: 0 4px;
-    color: {MUTED};
+    color: {TEXT};
 }}
 QDialog {{
     background-color: {BG_MAIN};
@@ -118,7 +118,7 @@ QTabWidget::pane {{
 }}
 QTabBar::tab {{
     background-color: {BG_PANEL};
-    color: {MUTED};
+    color: {TEXT};
     padding: 8px 16px;
     margin-right: 2px;
 }}
