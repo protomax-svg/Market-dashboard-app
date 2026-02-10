@@ -164,10 +164,7 @@ def build_surface_html(db: Database, req: SurfaceRequest) -> str:
     tf_series: Dict[str, List[Tuple[int, float]]] = {}
 
     for tf in req.timeframes:
-        if tf == "1m":
-            candles = db.get_candles_1m(req.symbol, req.start_ms, req.end_ms)
-        else:
-            candles = db.resample_candles(req.symbol, req.start_ms, req.end_ms, tf)
+        candles = db.get_candles(req.symbol, tf, req.start_ms, req.end_ms)
 
         if req.metric == "ER":
             pts = compute_efficiency_ratio(candles, window=50)
@@ -183,7 +180,7 @@ def build_surface_html(db: Database, req: SurfaceRequest) -> str:
     if not tf_series:
         raise ValueError("No series computed")
 
-    base_tf = "1m" if "1m" in req.timeframes else min(req.timeframes, key=lambda x: INTERVAL_MS[x])
+    base_tf = min(req.timeframes, key=lambda x: INTERVAL_MS[x])
     base_points = tf_series.get(base_tf, [])
     if len(base_points) < 3:
         raise ValueError("Not enough data in selected range for surface")
@@ -267,15 +264,12 @@ class Surface3DDock(QDockWidget):
         controls.addWidget(self.norm_box)
 
         controls.addWidget(QLabel("TFs:"))
-        self.tf_1m = QCheckBox("1m")
-        self.tf_1m.setChecked(True)
         self.tf_5m = QCheckBox("5m")
         self.tf_5m.setChecked(True)
         self.tf_15m = QCheckBox("15m")
         self.tf_15m.setChecked(True)
         self.tf_1h = QCheckBox("1h")
         self.tf_1h.setChecked(True)
-        controls.addWidget(self.tf_1m)
         controls.addWidget(self.tf_5m)
         controls.addWidget(self.tf_15m)
         controls.addWidget(self.tf_1h)
@@ -300,7 +294,7 @@ class Surface3DDock(QDockWidget):
         self.refresh_btn.clicked.connect(self.refresh)
         self.metric_box.currentIndexChanged.connect(lambda _: self.refresh())
         self.norm_box.stateChanged.connect(lambda _: self.refresh())
-        for cb in (self.tf_1m, self.tf_5m, self.tf_15m, self.tf_1h):
+        for cb in (self.tf_5m, self.tf_15m, self.tf_1h):
             cb.stateChanged.connect(lambda _: self.refresh())
 
         self.refresh()
@@ -310,8 +304,6 @@ class Surface3DDock(QDockWidget):
 
     def _selected_timeframes(self) -> List[str]:
         tfs: List[str] = []
-        if self.tf_1m.isChecked():
-            tfs.append("1m")
         if self.tf_5m.isChecked():
             tfs.append("5m")
         if self.tf_15m.isChecked():

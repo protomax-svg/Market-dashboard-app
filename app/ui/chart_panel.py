@@ -1,17 +1,18 @@
 """
 Generic chart panel (PyQtGraph) for one indicator: one or more timeseries.
-Includes timeframe selector (1m, 5m, 15m, 1h).
+Includes timeframe selector (5m, 15m, 1h).
 """
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy, QComboBox, QLabel, QSpinBox
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont
 import pyqtgraph as pg
 from pyqtgraph.graphicsItems.DateAxisItem import DateAxisItem
 
 from app.ui.theme import BG_PANEL, TEXT, ACCENT, BORDER
 
-TIMEFRAMES = ["1m", "5m", "15m", "1h"]
+TIMEFRAMES = ["5m", "15m", "1h"]
 DEFAULT_DISPLAY_DAYS = 90
 DISPLAY_DAYS_RANGE = (1, 36500)
 
@@ -50,7 +51,7 @@ class ChartPanel(QWidget):
         toolbar.addWidget(tf_label)
         self._tf_combo = QComboBox(self)
         self._tf_combo.addItems(TIMEFRAMES)
-        self._tf_combo.setCurrentText("1m")
+        self._tf_combo.setCurrentText("5m")
         self._tf_combo.currentTextChanged.connect(self._on_tf_changed)
         toolbar.addWidget(self._tf_combo)
         days_label = QLabel("Days:")
@@ -76,6 +77,15 @@ class ChartPanel(QWidget):
         layout.addWidget(self.plot_win)
         self._curves: Dict[str, pg.PlotDataItem] = {}
         self._colors = [ACCENT, "#34d399", "#6ee7b7", "#a7f3d0"]
+        # Watermark: indicator name, center of curve area, bright and large
+        self._watermark = pg.TextItem(
+            text=display_name,
+            color=(220, 220, 220, 200),
+            anchor=(0.5, 0.5),
+        )
+        self._watermark.setFont(QFont("Sans Serif", 14, QFont.Weight.Bold))
+        self._watermark.setZValue(100)
+        self.plot.addItem(self._watermark)
         if compact:
             self.setMaximumHeight(500)   # total height of bottom-row panel
             self.plot_win.setMaximumHeight(400)  # height of plot area (increase for taller chart)
@@ -128,6 +138,14 @@ class ChartPanel(QWidget):
         if x_min is not None and x_max is not None:
             padding = (x_max - x_min) * 0.02 or 1
             self.plot.setXRange(x_min - padding, x_max + padding, padding=0)
+            # Position watermark at center of area where curve exists
+            all_ys = [p[1] for points in series.values() for p in (points or [])]
+            if all_ys:
+                y_min_plot = min(all_ys)
+                y_max_plot = max(all_ys)
+                x_center = (x_min + x_max) / 2
+                y_center = (y_min_plot + y_max_plot) / 2
+                self._watermark.setPos(x_center, y_center)
 
     def clear(self) -> None:
         for curve in list(self._curves.values()):

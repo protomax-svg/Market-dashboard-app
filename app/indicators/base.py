@@ -20,7 +20,7 @@ class IndicatorBase(ABC):
     display_name: str = "Base"
     description: str = ""
 
-    # e.g. [{"name": "candles", "timeframe": "1m"}], optional "liquidations"
+    # e.g. [{"name": "candles", "timeframe": "5m"}], optional "liquidations"
     required_inputs: List[Dict[str, str]] = []
 
     # Composite indicators only: list of indicator ids whose output this indicator needs.

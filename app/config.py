@@ -12,7 +12,7 @@ DEFAULT_CONFIG_PATH = os.path.join(DEFAULT_STORAGE_PATH, "config.json")
 
 DEFAULTS = {
     "symbol": "BTCUSDT",
-    "timeframes_enabled": ["1m"],
+    "timeframes_enabled": ["5m"],
     "storage_path": DEFAULT_STORAGE_PATH,
     "retention_mode": "days",  # "days" | "size_gb"
     "retention_days": 90,

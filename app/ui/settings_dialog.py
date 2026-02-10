@@ -35,8 +35,8 @@ class SettingsDialog(QDialog):
         self.symbol_edit.setPlaceholderText("e.g. BTCUSDT")
         fl.addRow("Symbol:", self.symbol_edit)
 
-        self.timeframes_edit = QLineEdit(",".join(self.config.get("timeframes_enabled", ["1m"])))
-        self.timeframes_edit.setPlaceholderText("1m,5m,15m,1h")
+        self.timeframes_edit = QLineEdit(",".join(self.config.get("timeframes_enabled", ["5m"])))
+        self.timeframes_edit.setPlaceholderText("5m,15m,1h")
         fl.addRow("Timeframes enabled:", self.timeframes_edit)
 
         self.storage_edit = QLineEdit(self.config.get("storage_path", ""))
@@ -100,7 +100,7 @@ class SettingsDialog(QDialog):
     def get_config(self) -> Dict[str, Any]:
         out = dict(self.config)
         out["symbol"] = self.symbol_edit.text().strip() or "BTCUSDT"
-        tf_text = self.timeframes_edit.text().strip() or "1m"
+        tf_text = self.timeframes_edit.text().strip() or "5m"
         out["timeframes_enabled"] = [x.strip() for x in tf_text.split(",") if x.strip()]
         out["storage_path"] = self.storage_edit.text().strip() or None
         out["retention_mode"] = "size_gb" if self.retention_mode.currentIndex() == 1 else "days"

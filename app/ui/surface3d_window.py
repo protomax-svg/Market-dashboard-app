@@ -161,7 +161,7 @@ def build_surface_html_from_candles(inp: SurfaceInput) -> str:
     if not tf_series:
         raise ValueError("No series computed")
 
-    base_tf = "1m" if "1m" in inp.timeframes else min(inp.timeframes, key=lambda x: INTERVAL_MS.get(x, 0))
+    base_tf = min(inp.timeframes, key=lambda x: INTERVAL_MS.get(x, 0))
     base_points = tf_series.get(base_tf, [])
     if len(base_points) < 3:
         raise ValueError("Not enough data in selected range for surface")
@@ -288,15 +288,13 @@ class Surface3DWindow(QMainWindow):
         controls.addWidget(self.norm_box)
 
         controls.addWidget(QLabel("TFs:"))
-        self.tf_1m = QCheckBox("1m")
-        self.tf_1m.setChecked(True)
         self.tf_5m = QCheckBox("5m")
         self.tf_5m.setChecked(True)
         self.tf_15m = QCheckBox("15m")
         self.tf_15m.setChecked(True)
         self.tf_1h = QCheckBox("1h")
         self.tf_1h.setChecked(True)
-        for cb in (self.tf_1m, self.tf_5m, self.tf_15m, self.tf_1h):
+        for cb in (self.tf_5m, self.tf_15m, self.tf_1h):
             controls.addWidget(cb)
 
         self.refresh_btn = QPushButton("Refresh")
@@ -314,15 +312,13 @@ class Surface3DWindow(QMainWindow):
         self.refresh_btn.clicked.connect(self._on_refresh_clicked)
         self.metric_box.currentIndexChanged.connect(self._schedule_refresh)
         self.norm_box.stateChanged.connect(self._schedule_refresh)
-        for cb in (self.tf_1m, self.tf_5m, self.tf_15m, self.tf_1h):
+        for cb in (self.tf_5m, self.tf_15m, self.tf_1h):
             cb.stateChanged.connect(self._schedule_refresh)
 
         # No auto-run in __init__; start after show or on Refresh
 
     def _selected_timeframes(self) -> List[str]:
         tfs: List[str] = []
-        if self.tf_1m.isChecked():
-            tfs.append("1m")
         if self.tf_5m.isChecked():
             tfs.append("5m")
         if self.tf_15m.isChecked():
@@ -374,10 +370,7 @@ class Surface3DWindow(QMainWindow):
 
         tf_candles: Dict[str, List[Dict[str, Any]]] = {}
         for tf in tfs:
-            if tf == "1m":
-                candles = self._db.get_candles_1m(self._symbol, start_ms, end_ms)
-            else:
-                candles = self._db.resample_candles(self._symbol, start_ms, end_ms, tf)
+            candles = self._db.get_candles(self._symbol, tf, start_ms, end_ms)
             tf_candles[tf] = candles
 
         inp = SurfaceInput(

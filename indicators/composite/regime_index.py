@@ -28,7 +28,7 @@ from app.indicators.base import IndicatorBase, OutputSeries
 
 
 # Default percentile window; increase for longer lookback. Reload indicators after editing.
-INDEX_WINDOW = 10000
+INDEX_WINDOW = 100000
 # Neutral value for missing components so we can draw from earliest available data
 NEUTRAL = 0.5
 
@@ -199,7 +199,7 @@ class RegimeIndex(IndicatorBase):
         mdd_raw = _get_primary_series(indicator_series, "rolling_max_drawdown")
 
         lengths = [len(s) for s in [vov_raw, kurt_raw, amihud_raw, ui_raw, asym_raw, hurst_raw, pe_raw] if s]
-        effective_norm = min(norm_window, max(100, min(lengths) // 2)) if lengths else norm_window
+        effective_norm = min(norm_window, max(10, min(lengths) // 2)) if lengths else norm_window
 
         vov_pct = _rolling_percentile(vov_raw, effective_norm)
         kurt_pct = _rolling_percentile(kurt_raw, effective_norm)

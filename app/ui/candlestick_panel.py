@@ -1,5 +1,5 @@
 """
-Candlestick chart panel: OHLC with timeframe selector (1m, 5m, 15m, 1h).
+Candlestick chart panel: OHLC with timeframe selector (5m, 15m, 1h).
 Same layout as indicator panels (TF combo, date axis).
 """
 from typing import Any, Dict, List, Optional
@@ -11,7 +11,7 @@ from pyqtgraph.graphicsItems.DateAxisItem import DateAxisItem
 
 from app.ui.theme import BG_PANEL, TEXT
 
-TIMEFRAMES = ["1m", "5m", "15m", "1h"]
+TIMEFRAMES = ["5m", "15m", "1h"]
 UP_COLOR = "#22c55e"   # green
 DOWN_COLOR = "#ef4444" # red
 WICK_COLOR = "#64748b"
@@ -41,7 +41,7 @@ class CandlestickPanel(QWidget):
         toolbar.addWidget(tf_label)
         self._tf_combo = QComboBox(self)
         self._tf_combo.addItems(TIMEFRAMES)
-        self._tf_combo.setCurrentText("1m")
+        self._tf_combo.setCurrentText("5m")
         self._tf_combo.currentTextChanged.connect(self._on_tf_changed)
         toolbar.addWidget(self._tf_combo)
         toolbar.addStretch()

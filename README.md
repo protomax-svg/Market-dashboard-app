@@ -53,3 +53,17 @@ Set **Settings → Ngrok endpoint URL** to your Termux/ngrok HTTP endpoint. The 
 ## Layout
 
 Dock state and which indicator panels are visible are saved when you close the app and restored on next start.
+
+
+
+## Indicators
+
+1. Vol of Vol
+2. Realized Kurtosis
+3. Permutation Entropy
+4. Amihud Illiiquidity
+5. Rolling Hurst Exponent
+6. Realized Vol Asymmetry
+7. Rolling Max Drawdown
+8. Uclear Index
+9. Volume Stability

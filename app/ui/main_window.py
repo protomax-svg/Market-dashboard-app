@@ -45,8 +45,8 @@ logger = logging.getLogger(__name__)
 
 SETTINGS_ORG = "MarketMetrics"
 SETTINGS_APP = "MarketMetrics"
-INDICATOR_PANELS_KEY = "layout/indicator_panels"  # {indicator_id: {"tf": "1m", "days": 90}}
-REGIME_PANEL_KEY = "layout/regime_panel"  # {"tf": "1m", "days": 90}
+INDICATOR_PANELS_KEY = "layout/indicator_panels"  # {indicator_id: {"tf": "5m", "days": 90}}
+REGIME_PANEL_KEY = "layout/regime_panel"  # {"tf": "5m", "days": 90}
 REGIME_INDICATOR_ID = "regime_index"
 MAX_CANDLES_FOR_REFRESH = 4000  # cap to avoid O(N)/O(N^2) blocking UI
 
@@ -216,7 +216,7 @@ class MainWindow(QMainWindow):
             try:
                 data = json.loads(regime_json) if isinstance(regime_json, str) else regime_json
                 if isinstance(data, dict):
-                    tf = data.get("tf", "1m")
+                    tf = data.get("tf", "5m")
                     self._regime_panel.set_timeframe(tf)
                     if "days" in data:
                         self._regime_panel.set_display_days(int(data["days"]))
@@ -229,7 +229,7 @@ class MainWindow(QMainWindow):
                 for indicator_id, cfg in (data.items() if isinstance(data, dict) else []):
                     panel = self._indicator_panels.get(indicator_id)
                     if panel is not None and isinstance(cfg, dict):
-                        tf = cfg.get("tf", "1m")
+                        tf = cfg.get("tf", "5m")
                         panel.set_timeframe(tf)
                         if "days" in cfg:
                             panel.set_display_days(int(cfg["days"]))
@@ -452,10 +452,7 @@ class MainWindow(QMainWindow):
         liquidations = self._db.get_liquidations_1m(symbol, start_ms, end_ms) if symbol else []
         if len(liquidations) > MAX_CANDLES_FOR_REFRESH:
             liquidations = liquidations[-MAX_CANDLES_FOR_REFRESH:]
-        if tf == "1m":
-            candles = self._db.get_candles_1m(symbol, start_ms, end_ms)
-        else:
-            candles = self._db.resample_candles(symbol, start_ms, end_ms, tf)
+        candles = self._db.get_candles(symbol, tf, start_ms, end_ms)
         if candles and len(candles) > MAX_CANDLES_FOR_REFRESH:
             candles = candles[-MAX_CANDLES_FOR_REFRESH:]
         if not candles and "liquidations" not in [x.get("name") for x in cls.required_inputs]:

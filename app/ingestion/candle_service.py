@@ -1,5 +1,5 @@
 """
-Long-running candle ingestion: backfill from last stored timestamp, then poll for new 1m candles.
+Long-running candle ingestion: backfill only missing ranges, then poll for new candles (5m, 15m, 1h).
 
 Thread safety: on_progress is invoked from the ingestion thread. Do NOT update Qt widgets
 directly from this callback (causes freezes/crashes). Either:
@@ -146,8 +146,8 @@ class CandleIngestionService:
         return total_new
 
     def _has_any_candles(self) -> bool:
-        """True if DB already has at least one candle for this symbol (1m)."""
-        return self._db.get_last_candle_time_ms(self._symbol, "1m") is not None
+        """True if DB already has at least one candle for this symbol (5m)."""
+        return self._db.get_last_candle_time_ms(self._symbol, "5m") is not None
 
     def _backfill(self) -> None:
         for interval in CANDLE_TABLES:

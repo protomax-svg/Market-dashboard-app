@@ -1,5 +1,5 @@
 """
-SQLite storage: candles_1m, liquidations_1m, metrics. Retention pruning.
+SQLite storage: candles_5m/15m/1h, liquidations_1m, metrics. Retention pruning.
 """
 import os
 import sqlite3
@@ -15,7 +15,7 @@ INTERVAL_MS = {
     "1h": 3_600_000,
 }
 
-CANDLE_TABLES = ("1m", "5m", "15m", "1h")  # timeframes stored in separate tables
+CANDLE_TABLES = ("5m", "15m", "1h")  # timeframes stored; 1m removed (not used)
 
 
 def _utc_now_ms() -> int:
@@ -74,7 +74,7 @@ class Database:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
         return f"candles_{timeframe}"
 
-    def get_last_candle_time_ms(self, symbol: str, timeframe: str = "1m") -> Optional[int]:
+    def get_last_candle_time_ms(self, symbol: str, timeframe: str = "5m") -> Optional[int]:
         table = self._candle_table(timeframe)
         with self._lock:
             with self._conn() as c:
@@ -84,7 +84,7 @@ class Database:
                 ).fetchone()
                 return r[0] if r and r[0] is not None else None
 
-    def get_first_candle_time_ms(self, symbol: str, timeframe: str = "1m") -> Optional[int]:
+    def get_first_candle_time_ms(self, symbol: str, timeframe: str = "5m") -> Optional[int]:
         """Earliest (minimum) open_time for this symbol/timeframe. None if no data."""
         table = self._candle_table(timeframe)
         with self._lock:
@@ -136,7 +136,7 @@ class Database:
         end_ms: int,
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Load candles for the given timeframe from the API-backed table (1m, 5m, 15m, 1h)."""
+        """Load candles for the given timeframe from the API-backed table (5m, 15m, 1h)."""
         table = self._candle_table(timeframe)
         with self._lock:
             with self._conn() as c:
@@ -177,48 +177,10 @@ class Database:
         end_ms: int,
         timeframe: str,
     ) -> List[Dict[str, Any]]:
-        """Return candles for timeframe. Prefer native API-backed tables; fallback: resample from 1m."""
+        """Return candles for timeframe from native tables (5m, 15m, 1h). No 1m resampling."""
         if timeframe in CANDLE_TABLES:
             return self.get_candles(symbol, timeframe, start_ms, end_ms)
-        interval_ms = INTERVAL_MS.get(timeframe)
-        if not interval_ms:
-            return []
-        start_aligned = (start_ms // interval_ms) * interval_ms
-        rows = self.get_candles(symbol, "1m", start_aligned, end_ms, limit=None)
-        if not rows:
-            return []
-        out: List[Dict[str, Any]] = []
-        bucket_start = start_aligned
-        acc: List[Dict[str, Any]] = []
-        for r in rows:
-            t = r["open_time"]
-            if t >= bucket_start + interval_ms:
-                if acc:
-                    o = acc[0]["open"]
-                    h = max(x["high"] for x in acc)
-                    l = min(x["low"] for x in acc)
-                    c = acc[-1]["close"]
-                    v = sum(x["volume"] for x in acc)
-                    out.append({
-                        "open_time": bucket_start,
-                        "open": o, "high": h, "low": l, "close": c, "volume": v,
-                    })
-                while bucket_start + interval_ms <= t:
-                    bucket_start += interval_ms
-                acc = [r] if bucket_start <= t < bucket_start + interval_ms else []
-            else:
-                acc.append(r)
-        if acc:
-            o = acc[0]["open"]
-            h = max(x["high"] for x in acc)
-            l = min(x["low"] for x in acc)
-            c = acc[-1]["close"]
-            v = sum(x["volume"] for x in acc)
-            out.append({
-                "open_time": bucket_start,
-                "open": o, "high": h, "low": l, "close": c, "volume": v,
-            })
-        return out
+        return []
 
     def upsert_liquidations_1m(
         self,

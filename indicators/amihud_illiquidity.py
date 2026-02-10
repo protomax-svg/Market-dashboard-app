@@ -148,4 +148,11 @@ class AmihudIlliquidity(IndicatorBase):
             "rolling_sum": rolling_sum,
             "last_open_time": int(candles[-1]["open_time"]),
         }
+        # Normalize Y to [0, 1] so axis is readable (raw Amihud can be 1e-8 scale)
+        if out:
+            vals = [v for _, v in out]
+            v_min, v_max = min(vals), max(vals)
+            span = v_max - v_min
+            if span > 0:
+                out = [(t, (v - v_min) / span) for t, v in out]
         return ({"amihud": out} if out else {}, state)

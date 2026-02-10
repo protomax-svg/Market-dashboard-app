@@ -11,7 +11,7 @@ class VolOfVol(IndicatorBase):
     id = "vol_of_vol"
     display_name = "Vol-of-Vol"
     description = "Std of rolling volatility (ATR-based, Wilder smoothing)"
-    required_inputs = [{"name": "candles", "timeframe": "1m"}]
+    required_inputs = [{"name": "candles", "timeframe": "5m"}]
     parameters = {"vol_window": 20, "vov_window": 30}
     output_series_defs = [{"id": "vov", "label": "Vol-of-Vol"}]
 

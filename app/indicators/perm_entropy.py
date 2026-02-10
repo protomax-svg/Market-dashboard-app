@@ -13,7 +13,7 @@ Implementation notes:
 - Normalized to [0..1] by dividing by log(m!).
 
 Inputs:
-- candles (OHLCV) for the selected timeframe (1m/5m/15m/1h)
+- candles (OHLCV) for the selected timeframe (5m/15m/1h)
 
 Output series:
 - "pe": [(timestamp_ms, value), ...]
