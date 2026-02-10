@@ -102,7 +102,11 @@ class CandleIngestionService:
         return total_new
 
     def _backfill_one(self, interval: str) -> int:
-        """Backfill one timeframe: fill gap from start_date to earliest stored, then from last stored to now."""
+        """
+        Only fill MISSING ranges; never re-download existing data.
+        - If DB empty: fill from start_date (or 90d ago) to now.
+        - If DB has data: fill gap from start_date to first candle (if any), then from last candle to now.
+        """
         last_ms = self._db.get_last_candle_time_ms(self._symbol, interval)
         earliest_ms = self._db.get_first_candle_time_ms(self._symbol, interval)
         interval_ms = INTERVAL_MS[interval]
@@ -110,7 +114,7 @@ class CandleIngestionService:
         start_date_ms = _parse_start_date_ms(self._start_date)
         total_new = 0
 
-        # 1) Gap at the beginning: if user set start_date and existing data starts after it, fill from start_date to first candle
+        # 1) Gap at the beginning: only if we have data and it starts AFTER start_date
         if (
             start_date_ms is not None
             and earliest_ms is not None
@@ -121,16 +125,24 @@ class CandleIngestionService:
                 self._log(f"Backfill {interval} gap from start_date to first candle...")
                 total_new += self._backfill_range(interval, start_date_ms, gap_end_ms)
 
-        # 2) Forward from last candle to now
-        start_forward = (last_ms + interval_ms) if last_ms is not None else None
-        if start_forward is None:
+        # 2) Catch-up: only from (last_candle + 1) to now. If no data, fill from start_date (or 90d) to now.
+        if last_ms is not None:
+            start_forward = last_ms + interval_ms
+            if start_forward >= end_ms - interval_ms:
+                # Already up to date (within 1 interval of now); skip, poll will catch new candles
+                pass
+            else:
+                total_new += self._backfill_range(interval, start_forward, end_ms)
+        else:
+            # Empty DB: first-time fill from start_date to now (no overlap with existing)
             start_forward = (
                 start_date_ms
                 if start_date_ms is not None
                 else int((time.time() - BACKFILL_DAYS * 24 * 3600) * 1000)
             )
-        if start_forward < end_ms:
-            total_new += self._backfill_range(interval, start_forward, end_ms)
+            if start_forward < end_ms:
+                self._log(f"Backfill {interval} (empty DB) from start_date to now...")
+                total_new += self._backfill_range(interval, start_forward, end_ms)
         return total_new
 
     def _has_any_candles(self) -> bool:
@@ -177,9 +189,9 @@ class CandleIngestionService:
 
     def _run(self) -> None:
         if self._has_any_candles():
-            self._log("Backfilling (gap from start_date + catch-up); then polling...")
+            self._log("Checking gaps and catch-up only (no full re-download); then polling...")
         else:
-            self._log("Empty DB; backfilling (1m, 5m, 15m, 1h)...")
+            self._log("Empty DB; backfilling from start_date to now...")
         self._backfill()
         self._log("Backfill done")
         while self._running:

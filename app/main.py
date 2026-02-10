@@ -24,13 +24,24 @@ logging.basicConfig(
 
 
 def main() -> int:
+    print("MarketMetrics: starting...", flush=True)
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
     app.setApplicationName("MarketMetrics")
     app.setOrganizationName("MarketMetrics")
-    win = MainWindow()
-    win.show()
-    return app.exec()
+    try:
+        print("MarketMetrics: creating main window...", flush=True)
+        win = MainWindow()
+        print("MarketMetrics: showing window...", flush=True)
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        print("MarketMetrics: entering event loop.", flush=True)
+        return app.exec()
+    except Exception as e:
+        logging.exception("Launch failed: %s", e)
+        print(f"MarketMetrics: ERROR {e}", flush=True)
+        raise
 
 
 if __name__ == "__main__":

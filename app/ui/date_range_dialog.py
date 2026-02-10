@@ -25,7 +25,7 @@ class DateRangeDialog(QDialog):
         layout = QVBoxLayout(self)
         fl = QFormLayout()
         self.days_spin = QSpinBox()
-        self.days_spin.setRange(1, 365)
+        self.days_spin.setRange(1, 36500)  # no practical cap (e.g. 100 years)
         self.days_spin.setValue(current_days)
         self.days_spin.setSuffix(" days")
         fl.addRow("Display history:", self.days_spin)

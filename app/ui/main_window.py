@@ -4,9 +4,10 @@ Main window: dark theme, menu (Indicators, DateRange, Settings, Help), dock layo
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Type
+from typing import Any, Dict, List, Optional, Set, Type
 
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -14,7 +15,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QMenu,
     QMenuBar,
-    QDockWidget,
+    QTabWidget,
     QDialog,
     QMessageBox,
     QApplication,
@@ -22,7 +23,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QFrame,
 )
-from PySide6.QtCore import QSettings, Qt, QTimer, Signal, QUrl
+from PySide6.QtCore import QSettings, Qt, QTimer, Signal, QUrl, QByteArray
 from PySide6.QtGui import QAction, QDesktopServices
 
 from app.config import load_config, save_config, get_db_path, ensure_storage_dir, get_custom_indicators_dir
@@ -45,17 +46,20 @@ logger = logging.getLogger(__name__)
 
 SETTINGS_ORG = "MarketMetrics"
 SETTINGS_APP = "MarketMetrics"
-INDICATORS_VISIBLE_KEY = "layout/indicators_visible"
 INDICATOR_PANELS_KEY = "layout/indicator_panels"  # {indicator_id: {"tf": "1m"}}
-CANDLESTICK_KEY = "layout/candlestick"  # {"tf": "1m", "visible": true}
+CANDLESTICK_KEY = "layout/candlestick"  # {"tf": "1m"}
+CENTRAL_TAB_INDEX_KEY = "layout/central_tab_index"
 
 
 class MainWindow(QMainWindow):
     # Emit from worker thread; slot runs on main thread (do not touch widgets in on_progress).
     candle_progress = Signal(str)
+    # Emitted when retention thread finishes (so UI can stay responsive during prune).
+    retention_done = Signal()
 
     def __init__(self):
         super().__init__()
+        print("MainWindow: init start", flush=True)
         self.setWindowTitle("MarketMetrics")
         self.candle_progress.connect(self._on_candle_progress)
         self.setStyleSheet(STYLESHEET)
@@ -63,6 +67,7 @@ class MainWindow(QMainWindow):
         self.resize(1200, 700)
 
         self._config = load_config()
+        print("MainWindow: config loaded", flush=True)
         ensure_storage_dir(self._config.get("storage_path") or "")
         db_path = get_db_path(self._config)
         self._db = Database(db_path)
@@ -81,28 +86,53 @@ class MainWindow(QMainWindow):
         )
         for err in discover_errors:
             logger.warning("Indicator discover: %s", err)
+        print("MainWindow: indicators discovered", flush=True)
         self._indicator_classes: List[Type[IndicatorBase]] = classes
-        # indicator_id -> (QDockWidget, ChartPanel) — one static dock per indicator
-        self._indicator_panels: Dict[str, Tuple[QDockWidget, ChartPanel]] = {}
         self._indicator_actions: Dict[str, QAction] = {}
         self._indicator_class_by_id: Dict[str, Type[IndicatorBase]] = {c.id: c for c in self._indicator_classes}
         self._date_range_days = int(self._config.get("date_range_days", 90))
-        self._surface3d_window: Optional[Any] = None  # standalone 3D window, not a dock
-        self._candlestick_dock: Optional[QDockWidget] = None
+        self._surface3d_window: Optional[Any] = None  # standalone 3D window
         self._candlestick_panel: Optional[CandlestickPanel] = None
-        self._candlestick_action: Optional[QAction] = None
+        self._central_tabs: Optional[QTabWidget] = None
+        # indicator_id -> ChartPanel (all in central tab widget, fill center space)
+        self._indicator_panels: Dict[str, ChartPanel] = {}
+        self._layout_restored = False
 
-        self._build_central_placeholder()
-        self._build_candlestick_dock()
-        self._build_indicator_docks()  # one static dock per indicator (before menu so menu can read visibility)
-        self._build_menus()
-        self._restore_layout()
-        self._apply_retention()
-        self._start_services()
+        self._build_central_tabs()  # Candlestick + all indicators in center, fill space
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._refresh_all_indicators)
         self._refresh_timer.start(60 * 1000)  # refresh charts every 60s
-        QTimer.singleShot(2000, self._refresh_all_indicators)
+        # Defer menus + layout + retention + services so window can show first (avoids hang on menu/QSettings)
+        QTimer.singleShot(0, self._deferred_startup)
+        print("MainWindow: init done", flush=True)
+
+    def _deferred_startup(self) -> None:
+        """Run after first event loop tick: menus, layout, services; retention in background."""
+        print("MainWindow: deferred startup (menus, layout, services)...", flush=True)
+        self._build_menus()
+        self._restore_layout_only_tf_and_tab()
+        self._start_services()
+        # Run retention (DB prune) in background so UI stays responsive
+        self.retention_done.connect(self._on_retention_done, Qt.ConnectionType.QueuedConnection)
+        thread = threading.Thread(target=self._run_retention_in_thread, daemon=True)
+        thread.start()
+        print("MainWindow: deferred startup done (retention running in background)", flush=True)
+
+    def _run_retention_in_thread(self) -> None:
+        """Called from background thread: run retention then signal main thread."""
+        try:
+            self._apply_retention()
+        except Exception as e:
+            logger.exception("Retention failed: %s", e)
+        self.retention_done.emit()
+
+    def _on_retention_done(self) -> None:
+        """Slot: run on main thread after retention finishes; schedule first refresh."""
+        try:
+            self.retention_done.disconnect(self._on_retention_done)
+        except Exception:
+            pass
+        QTimer.singleShot(500, self._refresh_all_indicators)
 
     def _build_menus(self) -> None:
         menubar = self.menuBar()
@@ -125,46 +155,74 @@ class MainWindow(QMainWindow):
         help_action.triggered.connect(self._show_about)
         help_menu.addAction(help_action)
 
-    def _build_candlestick_dock(self) -> None:
-        """Create one static dock for the candlestick chart (same style as indicator docks)."""
-        panel = CandlestickPanel(self)
-        dock = QDockWidget("Candlestick", self)
-        dock.setObjectName("dock_candlestick")
-        dock.setWidget(panel)
-        dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
-        )
-        panel.timeframe_changed.connect(self._refresh_all_indicators)
+    def _build_central_tabs(self) -> None:
+        """Central tab widget: Candlestick + all indicators. Each tab fills the center space."""
+        tabs = QTabWidget(self)
+        tabs.setDocumentMode(True)
+        # Candlestick first
+        candlestick = CandlestickPanel(self)
+        candlestick.timeframe_changed.connect(self._refresh_all_indicators)
+        self._candlestick_panel = candlestick
+        tabs.addTab(candlestick, "Candlestick")
+        # Then one tab per indicator
+        for cls in self._indicator_classes:
+            if cls.id in self._indicator_panels:
+                continue
+            panel = ChartPanel(cls.id, cls.display_name, self)
+            panel.timeframe_changed.connect(self._refresh_all_indicators)
+            self._indicator_panels[cls.id] = panel
+            tabs.addTab(panel, cls.display_name)
+        self._central_tabs = tabs
+        self.setCentralWidget(tabs)
+        print("MainWindow: central tabs built", flush=True)
 
-        def on_candlestick_dock_visibility_changed(visible: bool) -> None:
-            if self._candlestick_action is not None:
-                self._candlestick_action.setChecked(visible)
-
-        dock.visibilityChanged.connect(on_candlestick_dock_visibility_changed)
-        self._candlestick_panel = panel
-        self._candlestick_dock = dock
-        self.addDockWidget(Qt.RightDockWidgetArea, dock)
-        dock.setVisible(True)
+    def _restore_layout_only_tf_and_tab(self) -> None:
+        """Restore TF and tab index from settings (no geometry; that is in showEvent)."""
+        settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+        candlestick_json = settings.value(CANDLESTICK_KEY)
+        if candlestick_json and self._candlestick_panel is not None:
+            try:
+                data = json.loads(candlestick_json) if isinstance(candlestick_json, str) else candlestick_json
+                if isinstance(data, dict):
+                    tf = data.get("tf", "1m")
+                    self._candlestick_panel.set_timeframe(tf)
+            except Exception:
+                pass
+        panels_json = settings.value(INDICATOR_PANELS_KEY)
+        if panels_json:
+            try:
+                data = json.loads(panels_json) if isinstance(panels_json, str) else panels_json
+                for indicator_id, cfg in (data.items() if isinstance(data, dict) else []):
+                    panel = self._indicator_panels.get(indicator_id)
+                    if panel is not None and isinstance(cfg, dict):
+                        tf = cfg.get("tf", "1m")
+                        panel.set_timeframe(tf)
+            except Exception:
+                pass
+        tab_index = settings.value(CENTRAL_TAB_INDEX_KEY)
+        if tab_index is not None and self._central_tabs is not None:
+            try:
+                idx = int(tab_index)
+                if 0 <= idx < self._central_tabs.count():
+                    self._central_tabs.setCurrentIndex(idx)
+            except (ValueError, TypeError):
+                pass
 
     def _rebuild_indicators_menu(self) -> None:
-        """(Re)build Indicators menu: Candlestick, then checkable per indicator, Vol Stability, Reload, Open Folder."""
+        """Indicators menu: switch to Candlestick or indicator tab; Vol Stability 3D, Reload, Open Folder."""
         self._indicators_menu.clear()
         self._indicator_actions.clear()
-        # Candlestick (same as indicators: one dock, checkable)
-        if self._candlestick_dock is not None and self._candlestick_panel is not None:
-            self._candlestick_action = QAction("Candlestick", self)
-            self._candlestick_action.setCheckable(True)
-            self._candlestick_action.setChecked(self._candlestick_dock.isVisible())
-            self._candlestick_action.triggered.connect(self._toggle_candlestick)
-            self._indicators_menu.addAction(self._candlestick_action)
+        if self._central_tabs is None or self._candlestick_panel is None:
+            return
+        # Candlestick: switch to its tab (always first)
+        candlestick_action = QAction("Candlestick", self)
+        candlestick_action.triggered.connect(self._show_candlestick_tab)
+        self._indicators_menu.addAction(candlestick_action)
         self._indicators_menu.addSeparator()
+        # One action per indicator: switch to that tab by panel
         for cls in self._indicator_classes:
             action = QAction(cls.display_name, self)
-            action.setCheckable(True)
-            dock, panel = self._indicator_panels.get(cls.id, (None, None))
-            action.setChecked(dock.isVisible() if dock is not None else True)
-            action.triggered.connect(lambda checked, id=cls.id: self._toggle_indicator(id, checked))
+            action.triggered.connect(lambda checked=False, id=cls.id: self._show_indicator_tab(id))
             self._indicators_menu.addAction(action)
             self._indicator_actions[cls.id] = action
         if Surface3DWindow is not None:
@@ -180,58 +238,25 @@ class MainWindow(QMainWindow):
         open_folder_action.triggered.connect(self._open_indicators_folder)
         self._indicators_menu.addAction(open_folder_action)
 
-    def _build_central_placeholder(self) -> None:
-        central = QWidget()
-        layout = QVBoxLayout(central)
-        label = QLabel("Charts appear in dock panels. Use Indicators menu to show/hide each indicator.")
-        label.setStyleSheet(f"color: {TEXT}; padding: 20px;")
-        layout.addWidget(label)
-        self.setCentralWidget(central)
+    def _show_candlestick_tab(self) -> None:
+        """Switch central tab to Candlestick."""
+        if self._central_tabs is not None and self._candlestick_panel is not None:
+            idx = self._central_tabs.indexOf(self._candlestick_panel)
+            if idx >= 0:
+                self._central_tabs.setCurrentIndex(idx)
 
-    def _build_indicator_docks(self) -> None:
-        """Create one static dock per indicator (not closable; show/hide via menu)."""
-        for cls in self._indicator_classes:
-            if cls.id in self._indicator_panels:
-                continue
-            panel = ChartPanel(cls.id, cls.display_name, self)
-            dock = QDockWidget(cls.display_name, self)
-            dock.setObjectName(f"dock_{cls.id}")
-            dock.setWidget(panel)
-            dock.setFeatures(
-                QDockWidget.DockWidgetFeature.DockWidgetMovable
-                | QDockWidget.DockWidgetFeature.DockWidgetFloatable
-            )
-            panel.timeframe_changed.connect(self._refresh_all_indicators)
-
-            def on_dock_visibility_changed(visible: bool) -> None:
-                action = self._indicator_actions.get(cls.id)
-                if action is not None:
-                    action.setChecked(visible)
-
-            dock.visibilityChanged.connect(on_dock_visibility_changed)
-            self._indicator_panels[cls.id] = (dock, panel)
-            self.addDockWidget(Qt.RightDockWidgetArea, dock)
-            dock.setVisible(True)
-
-    def _toggle_candlestick(self, visible: bool) -> None:
-        """Show or hide the candlestick dock."""
-        if self._candlestick_dock is not None:
-            self._candlestick_dock.setVisible(visible)
-            if self._candlestick_action is not None:
-                self._candlestick_action.setChecked(visible)
-
-    def _toggle_indicator(self, indicator_id: str, visible: bool) -> None:
-        """Show or hide the single dock for this indicator."""
-        pair = self._indicator_panels.get(indicator_id)
-        if pair is not None:
-            dock, _ = pair
-            dock.setVisible(visible)
-            action = self._indicator_actions.get(indicator_id)
-            if action is not None:
-                action.setChecked(visible)
+    def _show_indicator_tab(self, indicator_id: str) -> None:
+        """Switch central tab to the indicator panel for indicator_id."""
+        if self._central_tabs is None:
+            return
+        panel = self._indicator_panels.get(indicator_id)
+        if panel is not None:
+            idx = self._central_tabs.indexOf(panel)
+            if idx >= 0:
+                self._central_tabs.setCurrentIndex(idx)
 
     def _reload_indicators(self) -> None:
-        """Re-scan plugin dirs, reload modules, update menu and docks. Runs on UI thread."""
+        """Re-scan plugin dirs, reload modules, rebuild central tabs and menu. Runs on UI thread."""
         classes, errors = discover_indicators(
             self._project_indicators_dir,
             self._custom_indicators_dir,
@@ -249,15 +274,23 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Indicators reloaded", 3000)
         self._indicator_classes = classes
         self._indicator_class_by_id = {c.id: c for c in self._indicator_classes}
-        # Close docks for removed indicators
-        for indicator_id in list(self._indicator_panels.keys()):
-            if indicator_id not in self._indicator_class_by_id:
-                dock, _ = self._indicator_panels[indicator_id]
-                dock.setVisible(False)
-                dock.deleteLater()
-                del self._indicator_panels[indicator_id]
-        # Create one dock per new indicator
-        self._build_indicator_docks()
+        # Remove tabs for removed indicators; keep candlestick and existing panels
+        if self._central_tabs is not None:
+            for indicator_id in list(self._indicator_panels.keys()):
+                if indicator_id not in self._indicator_class_by_id:
+                    panel = self._indicator_panels[indicator_id]
+                    idx = self._central_tabs.indexOf(panel)
+                    if idx >= 0:
+                        self._central_tabs.removeTab(idx)
+                    panel.deleteLater()
+                    del self._indicator_panels[indicator_id]
+        # Add tabs for new indicators
+        for cls in self._indicator_classes:
+            if cls.id not in self._indicator_panels and self._central_tabs is not None:
+                panel = ChartPanel(cls.id, cls.display_name, self)
+                panel.timeframe_changed.connect(self._refresh_all_indicators)
+                self._indicator_panels[cls.id] = panel
+                self._central_tabs.addTab(panel, cls.display_name)
         self._rebuild_indicators_menu()
         self._refresh_all_indicators()
 
@@ -296,73 +329,51 @@ class MainWindow(QMainWindow):
 
     def _restore_layout(self) -> None:
         settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
-        # Candlestick: TF and visibility
+        # Candlestick TF
         candlestick_json = settings.value(CANDLESTICK_KEY)
-        if candlestick_json and self._candlestick_dock is not None and self._candlestick_panel is not None:
+        if candlestick_json and self._candlestick_panel is not None:
             try:
                 data = json.loads(candlestick_json) if isinstance(candlestick_json, str) else candlestick_json
                 if isinstance(data, dict):
                     tf = data.get("tf", "1m")
                     self._candlestick_panel.set_timeframe(tf)
-                    if "visible" in data:
-                        self._candlestick_dock.setVisible(bool(data["visible"]))
             except Exception:
                 pass
-        # Restore TF and visibility per indicator (one dock per indicator)
+        # TF per indicator
         panels_json = settings.value(INDICATOR_PANELS_KEY)
         if panels_json:
             try:
                 data: Dict[str, Dict[str, str]] = json.loads(panels_json) if isinstance(panels_json, str) else panels_json
                 for indicator_id, cfg in data.items():
-                    pair = self._indicator_panels.get(indicator_id)
-                    if pair is None:
-                        continue
-                    _, panel = pair
-                    if panel is not None:
-                        tf = (cfg or {}).get("tf", "1m")
+                    panel = self._indicator_panels.get(indicator_id)
+                    if panel is not None and isinstance(cfg, dict):
+                        tf = cfg.get("tf", "1m")
                         panel.set_timeframe(tf)
             except Exception:
                 pass
-        visible_json = settings.value(INDICATORS_VISIBLE_KEY)
-        if visible_json:
+        # Central tab index (which indicator is in center)
+        tab_index = settings.value(CENTRAL_TAB_INDEX_KEY)
+        if tab_index is not None and self._central_tabs is not None:
             try:
-                visible_ids: List[str] = json.loads(visible_json) if isinstance(visible_json, str) else visible_json
-                visible_set = set(visible_ids)
-                for indicator_id, (dock, _) in self._indicator_panels.items():
-                    dock.setVisible(indicator_id in visible_set)
-            except Exception:
+                idx = int(tab_index)
+                if 0 <= idx < self._central_tabs.count():
+                    self._central_tabs.setCurrentIndex(idx)
+            except (ValueError, TypeError):
                 pass
-        state = settings.value("layout/dockState")
-        if state is not None:
-            try:
-                self.restoreState(state)
-            except Exception:
-                pass
-        geometry = settings.value("layout/geometry")
-        if geometry is not None:
-            try:
-                self.restoreGeometry(geometry)
-            except Exception:
-                pass
+        # Geometry restored in showEvent() so window is fully initialized (avoids off-screen / no-show)
 
     def _save_layout(self) -> None:
         settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
-        if self._candlestick_dock is not None and self._candlestick_panel is not None:
-            candlestick_data = {
-                "tf": self._candlestick_panel.get_timeframe(),
-                "visible": self._candlestick_dock.isVisible(),
-            }
+        if self._candlestick_panel is not None:
+            candlestick_data = {"tf": self._candlestick_panel.get_timeframe()}
             settings.setValue(CANDLESTICK_KEY, json.dumps(candlestick_data))
         panels_data: Dict[str, Dict[str, str]] = {}
-        visible_ids: List[str] = []
-        for indicator_id, (dock, panel) in self._indicator_panels.items():
+        for indicator_id, panel in self._indicator_panels.items():
             if panel is not None:
                 panels_data[indicator_id] = {"tf": panel.get_timeframe()}
-            if dock.isVisible():
-                visible_ids.append(indicator_id)
         settings.setValue(INDICATOR_PANELS_KEY, json.dumps(panels_data))
-        settings.setValue(INDICATORS_VISIBLE_KEY, json.dumps(visible_ids))
-        settings.setValue("layout/dockState", self.saveState())
+        if self._central_tabs is not None:
+            settings.setValue(CENTRAL_TAB_INDEX_KEY, self._central_tabs.currentIndex())
         settings.setValue("layout/geometry", self.saveGeometry())
 
     def _open_date_range(self) -> None:
@@ -443,7 +454,7 @@ class MainWindow(QMainWindow):
         start_ms = end_ms - days_ms
         liquidations = self._db.get_liquidations_1m(symbol, start_ms, end_ms) if symbol else []
         # Refresh candlestick panel: use native DB table for selected TF (1m, 5m, 15m, 1h), not resampled from 1m
-        if self._candlestick_dock is not None and self._candlestick_panel is not None and self._candlestick_dock.isVisible():
+        if self._candlestick_panel is not None:
             try:
                 tf = self._candlestick_panel.get_timeframe()
                 candles = self._db.get_candles(symbol, tf, start_ms, end_ms)
@@ -451,9 +462,7 @@ class MainWindow(QMainWindow):
                     self._candlestick_panel.set_data(candles)
             except Exception as e:
                 logger.exception("Candlestick panel failed: %s", e)
-        for indicator_id, (dock, panel) in self._indicator_panels.items():
-            if not dock.isVisible():
-                continue
+        for indicator_id, panel in self._indicator_panels.items():
             if panel is None:
                 continue
             cls = self._indicator_class_by_id.get(indicator_id)
@@ -495,6 +504,26 @@ class MainWindow(QMainWindow):
                     panel.set_data(series)
             except Exception as e:
                 logger.exception("Indicator %s failed: %s", indicator_id, e)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._layout_restored:
+            self._layout_restored = True
+            settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+            geometry = settings.value("layout/geometry")
+            if geometry is not None:
+                try:
+                    if isinstance(geometry, bytes):
+                        geometry = QByteArray(geometry)
+                    self.restoreGeometry(geometry)
+                    # Ensure window is on a visible screen (e.g. after monitor change)
+                    screen = QApplication.screenAt(self.mapToGlobal(self.rect().center()))
+                    if screen is not None:
+                        sr = screen.availableGeometry()
+                        if not sr.intersects(self.frameGeometry()):
+                            self.move(sr.topLeft())
+                except Exception as e:
+                    logger.debug("Restore geometry failed: %s", e)
 
     def closeEvent(self, event) -> None:
         self._save_layout()
