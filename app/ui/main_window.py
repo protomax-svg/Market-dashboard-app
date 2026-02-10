@@ -13,9 +13,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
     QMenu,
     QMenuBar,
-    QTabWidget,
     QDialog,
     QMessageBox,
     QApplication,
@@ -34,7 +34,6 @@ from app.indicators import discover_indicators
 from app.indicators.base import IndicatorBase, IndicatorSeriesInput
 from app.ui.theme import STYLESHEET, TEXT
 from app.ui.chart_panel import ChartPanel
-from app.ui.candlestick_panel import CandlestickPanel
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.date_range_dialog import DateRangeDialog
 try:
@@ -46,9 +45,10 @@ logger = logging.getLogger(__name__)
 
 SETTINGS_ORG = "MarketMetrics"
 SETTINGS_APP = "MarketMetrics"
-INDICATOR_PANELS_KEY = "layout/indicator_panels"  # {indicator_id: {"tf": "1m"}}
-CANDLESTICK_KEY = "layout/candlestick"  # {"tf": "1m"}
-CENTRAL_TAB_INDEX_KEY = "layout/central_tab_index"
+INDICATOR_PANELS_KEY = "layout/indicator_panels"  # {indicator_id: {"tf": "1m", "days": 90}}
+REGIME_PANEL_KEY = "layout/regime_panel"  # {"tf": "1m", "days": 90}
+REGIME_INDICATOR_ID = "regime_index"
+MAX_CANDLES_FOR_REFRESH = 4000  # cap to avoid O(N)/O(N^2) blocking UI
 
 
 class MainWindow(QMainWindow):
@@ -92,15 +92,16 @@ class MainWindow(QMainWindow):
         self._indicator_class_by_id: Dict[str, Type[IndicatorBase]] = {c.id: c for c in self._indicator_classes}
         self._date_range_days = int(self._config.get("date_range_days", 90))
         self._surface3d_window: Optional[Any] = None  # standalone 3D window
-        self._candlestick_panel: Optional[CandlestickPanel] = None
-        self._central_tabs: Optional[QTabWidget] = None
-        # indicator_id -> ChartPanel (all in central tab widget, fill center space)
+        self._regime_panel: Optional[ChartPanel] = None  # one big chart (Regime Index)
+        # indicator_id -> ChartPanel (compact, bottom row; excludes regime_index)
         self._indicator_panels: Dict[str, ChartPanel] = {}
         self._layout_restored = False
+        self._startup_in_progress = True  # guard: skip indicator refresh during restore
+        self._refresh_pending = False  # coalesce multiple refresh triggers
 
         self._build_central_tabs()  # Candlestick + all indicators in center, fill space
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.timeout.connect(self._refresh_all_indicators)
+        self._refresh_timer.timeout.connect(self._schedule_refresh_all_indicators)
         self._refresh_timer.start(60 * 1000)  # refresh charts every 60s
         # Defer menus + layout + retention + services so window can show first (avoids hang on menu/QSettings)
         QTimer.singleShot(0, self._deferred_startup)
@@ -116,6 +117,7 @@ class MainWindow(QMainWindow):
         self.retention_done.connect(self._on_retention_done, Qt.ConnectionType.QueuedConnection)
         thread = threading.Thread(target=self._run_retention_in_thread, daemon=True)
         thread.start()
+        self._startup_in_progress = False  # allow indicator refresh after startup
         print("MainWindow: deferred startup done (retention running in background)", flush=True)
 
     def _run_retention_in_thread(self) -> None:
@@ -132,7 +134,7 @@ class MainWindow(QMainWindow):
             self.retention_done.disconnect(self._on_retention_done)
         except Exception:
             pass
-        QTimer.singleShot(500, self._refresh_all_indicators)
+        QTimer.singleShot(500, self._schedule_refresh_all_indicators)
 
     def _build_menus(self) -> None:
         menubar = self.menuBar()
@@ -156,36 +158,68 @@ class MainWindow(QMainWindow):
         help_menu.addAction(help_action)
 
     def _build_central_tabs(self) -> None:
-        """Central tab widget: Candlestick + all indicators. Each tab fills the center space."""
-        tabs = QTabWidget(self)
-        tabs.setDocumentMode(True)
-        # Candlestick first
-        candlestick = CandlestickPanel(self)
-        candlestick.timeframe_changed.connect(self._refresh_all_indicators)
-        self._candlestick_panel = candlestick
-        tabs.addTab(candlestick, "Candlestick")
-        # Then one tab per indicator
+        """One big Regime Index chart on top; bottom row of compact indicator panels (no candles)."""
+        central = QWidget(self)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        # Top: one big chart = Regime Index only (static)
+        regime_cls = self._indicator_class_by_id.get(REGIME_INDICATOR_ID)
+        if regime_cls is not None:
+            self._regime_panel = ChartPanel(
+                REGIME_INDICATOR_ID,
+                regime_cls.display_name,
+                self,
+                compact=False,
+            )
+            self._regime_panel.timeframe_changed.connect(self._schedule_refresh_all_indicators)
+            # Decrease this value to make the main chart smaller (pixels)
+            self._regime_panel.setMaximumHeight(600)
+            layout.addWidget(self._regime_panel, stretch=1)
+        else:
+            placeholder = QLabel("Regime Index indicator not found. Use Reload Indicators.")
+            placeholder.setStyleSheet(f"color: {TEXT}; padding: 20px;")
+            layout.addWidget(placeholder, stretch=1)
+
+        # Bottom: horizontal row of compact indicator panels (all except regime_index, no candlestick)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setMaximumHeight(500)  # height of bottom strip (increase for bigger charts)
+        row_content = QWidget(self)
+        row_hbox = QHBoxLayout(row_content)
+        row_hbox.setContentsMargins(0, 4, 0, 0)
         for cls in self._indicator_classes:
+            if cls.id == REGIME_INDICATOR_ID:
+                continue
             if cls.id in self._indicator_panels:
                 continue
-            panel = ChartPanel(cls.id, cls.display_name, self)
-            panel.timeframe_changed.connect(self._refresh_all_indicators)
+            panel = ChartPanel(cls.id, cls.display_name, self, compact=True)
+            panel.setMinimumWidth(233)   # min width per panel
+            panel.setMaximumWidth(420)   # max width per panel (increase for wider charts)
+            panel.timeframe_changed.connect(self._schedule_refresh_all_indicators)
             self._indicator_panels[cls.id] = panel
-            tabs.addTab(panel, cls.display_name)
-        self._central_tabs = tabs
-        self.setCentralWidget(tabs)
-        print("MainWindow: central tabs built", flush=True)
+            row_hbox.addWidget(panel)
+        row_hbox.addStretch()
+        scroll.setWidget(row_content)
+        layout.addWidget(scroll)
+        self.setCentralWidget(central)
+        print("MainWindow: central layout built (regime + bottom row)", flush=True)
 
     def _restore_layout_only_tf_and_tab(self) -> None:
         """Restore TF and tab index from settings (no geometry; that is in showEvent)."""
         settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
-        candlestick_json = settings.value(CANDLESTICK_KEY)
-        if candlestick_json and self._candlestick_panel is not None:
+        regime_json = settings.value(REGIME_PANEL_KEY)
+        if regime_json and self._regime_panel is not None:
             try:
-                data = json.loads(candlestick_json) if isinstance(candlestick_json, str) else candlestick_json
+                data = json.loads(regime_json) if isinstance(regime_json, str) else regime_json
                 if isinstance(data, dict):
                     tf = data.get("tf", "1m")
-                    self._candlestick_panel.set_timeframe(tf)
+                    self._regime_panel.set_timeframe(tf)
+                    if "days" in data:
+                        self._regime_panel.set_display_days(int(data["days"]))
             except Exception:
                 pass
         panels_json = settings.value(INDICATOR_PANELS_KEY)
@@ -197,36 +231,16 @@ class MainWindow(QMainWindow):
                     if panel is not None and isinstance(cfg, dict):
                         tf = cfg.get("tf", "1m")
                         panel.set_timeframe(tf)
+                        if "days" in cfg:
+                            panel.set_display_days(int(cfg["days"]))
             except Exception:
-                pass
-        tab_index = settings.value(CENTRAL_TAB_INDEX_KEY)
-        if tab_index is not None and self._central_tabs is not None:
-            try:
-                idx = int(tab_index)
-                if 0 <= idx < self._central_tabs.count():
-                    self._central_tabs.setCurrentIndex(idx)
-            except (ValueError, TypeError):
                 pass
 
     def _rebuild_indicators_menu(self) -> None:
-        """Indicators menu: switch to Candlestick or indicator tab; Vol Stability 3D, Reload, Open Folder."""
+        """Indicators menu: Vol Stability 3D, Reload, Open Folder."""
         self._indicators_menu.clear()
         self._indicator_actions.clear()
-        if self._central_tabs is None or self._candlestick_panel is None:
-            return
-        # Candlestick: switch to its tab (always first)
-        candlestick_action = QAction("Candlestick", self)
-        candlestick_action.triggered.connect(self._show_candlestick_tab)
-        self._indicators_menu.addAction(candlestick_action)
-        self._indicators_menu.addSeparator()
-        # One action per indicator: switch to that tab by panel
-        for cls in self._indicator_classes:
-            action = QAction(cls.display_name, self)
-            action.triggered.connect(lambda checked=False, id=cls.id: self._show_indicator_tab(id))
-            self._indicators_menu.addAction(action)
-            self._indicator_actions[cls.id] = action
         if Surface3DWindow is not None:
-            self._indicators_menu.addSeparator()
             action = QAction("Vol Stability (3D)...", self)
             action.triggered.connect(self._open_vol_stability_window)
             self._indicators_menu.addAction(action)
@@ -238,25 +252,8 @@ class MainWindow(QMainWindow):
         open_folder_action.triggered.connect(self._open_indicators_folder)
         self._indicators_menu.addAction(open_folder_action)
 
-    def _show_candlestick_tab(self) -> None:
-        """Switch central tab to Candlestick."""
-        if self._central_tabs is not None and self._candlestick_panel is not None:
-            idx = self._central_tabs.indexOf(self._candlestick_panel)
-            if idx >= 0:
-                self._central_tabs.setCurrentIndex(idx)
-
-    def _show_indicator_tab(self, indicator_id: str) -> None:
-        """Switch central tab to the indicator panel for indicator_id."""
-        if self._central_tabs is None:
-            return
-        panel = self._indicator_panels.get(indicator_id)
-        if panel is not None:
-            idx = self._central_tabs.indexOf(panel)
-            if idx >= 0:
-                self._central_tabs.setCurrentIndex(idx)
-
     def _reload_indicators(self) -> None:
-        """Re-scan plugin dirs, reload modules, rebuild central tabs and menu. Runs on UI thread."""
+        """Re-scan plugin dirs, reload modules, rebuild central layout and menu. Runs on UI thread."""
         classes, errors = discover_indicators(
             self._project_indicators_dir,
             self._custom_indicators_dir,
@@ -274,25 +271,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Indicators reloaded", 3000)
         self._indicator_classes = classes
         self._indicator_class_by_id = {c.id: c for c in self._indicator_classes}
-        # Remove tabs for removed indicators; keep candlestick and existing panels
-        if self._central_tabs is not None:
-            for indicator_id in list(self._indicator_panels.keys()):
-                if indicator_id not in self._indicator_class_by_id:
-                    panel = self._indicator_panels[indicator_id]
-                    idx = self._central_tabs.indexOf(panel)
-                    if idx >= 0:
-                        self._central_tabs.removeTab(idx)
-                    panel.deleteLater()
-                    del self._indicator_panels[indicator_id]
-        # Add tabs for new indicators
-        for cls in self._indicator_classes:
-            if cls.id not in self._indicator_panels and self._central_tabs is not None:
-                panel = ChartPanel(cls.id, cls.display_name, self)
-                panel.timeframe_changed.connect(self._refresh_all_indicators)
-                self._indicator_panels[cls.id] = panel
-                self._central_tabs.addTab(panel, cls.display_name)
+        # Rebuild central layout (regime + bottom row)
+        self._regime_panel = None
+        for panel in list(self._indicator_panels.values()):
+            panel.deleteLater()
+        self._indicator_panels.clear()
+        self._build_central_tabs()
+        self._restore_layout_only_tf_and_tab()
         self._rebuild_indicators_menu()
-        self._refresh_all_indicators()
+        self._schedule_refresh_all_indicators()
 
     def _open_indicators_folder(self) -> None:
         """Open custom indicators directory in system file manager."""
@@ -328,52 +315,19 @@ class MainWindow(QMainWindow):
         win.show()
 
     def _restore_layout(self) -> None:
-        settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
-        # Candlestick TF
-        candlestick_json = settings.value(CANDLESTICK_KEY)
-        if candlestick_json and self._candlestick_panel is not None:
-            try:
-                data = json.loads(candlestick_json) if isinstance(candlestick_json, str) else candlestick_json
-                if isinstance(data, dict):
-                    tf = data.get("tf", "1m")
-                    self._candlestick_panel.set_timeframe(tf)
-            except Exception:
-                pass
-        # TF per indicator
-        panels_json = settings.value(INDICATOR_PANELS_KEY)
-        if panels_json:
-            try:
-                data: Dict[str, Dict[str, str]] = json.loads(panels_json) if isinstance(panels_json, str) else panels_json
-                for indicator_id, cfg in data.items():
-                    panel = self._indicator_panels.get(indicator_id)
-                    if panel is not None and isinstance(cfg, dict):
-                        tf = cfg.get("tf", "1m")
-                        panel.set_timeframe(tf)
-            except Exception:
-                pass
-        # Central tab index (which indicator is in center)
-        tab_index = settings.value(CENTRAL_TAB_INDEX_KEY)
-        if tab_index is not None and self._central_tabs is not None:
-            try:
-                idx = int(tab_index)
-                if 0 <= idx < self._central_tabs.count():
-                    self._central_tabs.setCurrentIndex(idx)
-            except (ValueError, TypeError):
-                pass
-        # Geometry restored in showEvent() so window is fully initialized (avoids off-screen / no-show)
+        """Restore TF and display days for regime + bottom indicators (geometry in showEvent)."""
+        self._restore_layout_only_tf_and_tab()
 
     def _save_layout(self) -> None:
         settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
-        if self._candlestick_panel is not None:
-            candlestick_data = {"tf": self._candlestick_panel.get_timeframe()}
-            settings.setValue(CANDLESTICK_KEY, json.dumps(candlestick_data))
-        panels_data: Dict[str, Dict[str, str]] = {}
+        if self._regime_panel is not None:
+            regime_data = {"tf": self._regime_panel.get_timeframe(), "days": self._regime_panel.get_display_days()}
+            settings.setValue(REGIME_PANEL_KEY, json.dumps(regime_data))
+        panels_data: Dict[str, Dict[str, Any]] = {}
         for indicator_id, panel in self._indicator_panels.items():
             if panel is not None:
-                panels_data[indicator_id] = {"tf": panel.get_timeframe()}
+                panels_data[indicator_id] = {"tf": panel.get_timeframe(), "days": panel.get_display_days()}
         settings.setValue(INDICATOR_PANELS_KEY, json.dumps(panels_data))
-        if self._central_tabs is not None:
-            settings.setValue(CENTRAL_TAB_INDEX_KEY, self._central_tabs.currentIndex())
         settings.setValue("layout/geometry", self.saveGeometry())
 
     def _open_date_range(self) -> None:
@@ -385,7 +339,7 @@ class MainWindow(QMainWindow):
             lookback_hours = self._date_range_days * 24
             if self._surface3d_window is not None and self._surface3d_window.isVisible():
                 self._surface3d_window.set_lookback_hours(lookback_hours)
-            self._refresh_all_indicators()
+            self._schedule_refresh_all_indicators()
 
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self._config, self)
@@ -447,63 +401,97 @@ class MainWindow(QMainWindow):
             self._liquidation_client.stop()
             self._liquidation_client = None
 
+    def _schedule_refresh_all_indicators(self) -> None:
+        """Schedule a single refresh; coalesces multiple triggers (e.g. layout restore + tf change)."""
+        if self._startup_in_progress:
+            return
+        if self._refresh_pending:
+            return
+        self._refresh_pending = True
+        QTimer.singleShot(0, self._refresh_all_indicators_safe)
+
+    def _refresh_all_indicators_safe(self) -> None:
+        """Clear pending flag then run refresh (called from timer)."""
+        self._refresh_pending = False
+        self._refresh_all_indicators()
+
     def _refresh_all_indicators(self) -> None:
+        if self._startup_in_progress:
+            return
         symbol = self._config.get("symbol", "BTCUSDT")
-        days_ms = self._date_range_days * 24 * 60 * 60 * 1000
         end_ms = int(time.time() * 1000)
-        start_ms = end_ms - days_ms
-        liquidations = self._db.get_liquidations_1m(symbol, start_ms, end_ms) if symbol else []
-        # Refresh candlestick panel: use native DB table for selected TF (1m, 5m, 15m, 1h), not resampled from 1m
-        if self._candlestick_panel is not None:
-            try:
-                tf = self._candlestick_panel.get_timeframe()
-                candles = self._db.get_candles(symbol, tf, start_ms, end_ms)
-                if candles:
-                    self._candlestick_panel.set_data(candles)
-            except Exception as e:
-                logger.exception("Candlestick panel failed: %s", e)
+
+        # Refresh regime panel (one big chart) with its own display days
+        if self._regime_panel is not None:
+            regime_days = self._regime_panel.get_display_days()
+            regime_days_ms = regime_days * 24 * 60 * 60 * 1000
+            regime_start_ms = end_ms - regime_days_ms
+            self._refresh_one_indicator(REGIME_INDICATOR_ID, self._regime_panel, regime_start_ms, end_ms, symbol)
+
         for indicator_id, panel in self._indicator_panels.items():
             if panel is None:
                 continue
-            cls = self._indicator_class_by_id.get(indicator_id)
-            if not cls:
-                continue
-            tf = panel.get_timeframe()
-            if tf == "1m":
-                candles = self._db.get_candles_1m(symbol, start_ms, end_ms)
+            days = panel.get_display_days()
+            days_ms = days * 24 * 60 * 60 * 1000
+            start_ms = end_ms - days_ms
+            self._refresh_one_indicator(indicator_id, panel, start_ms, end_ms, symbol)
+
+    def _refresh_one_indicator(
+        self,
+        indicator_id: str,
+        panel: ChartPanel,
+        start_ms: int,
+        end_ms: int,
+        symbol: str,
+    ) -> None:
+        """Fetch data for [start_ms, end_ms], compute indicator, update panel."""
+        cls = self._indicator_class_by_id.get(indicator_id)
+        if not cls:
+            return
+        tf = panel.get_timeframe()
+        liquidations = self._db.get_liquidations_1m(symbol, start_ms, end_ms) if symbol else []
+        if len(liquidations) > MAX_CANDLES_FOR_REFRESH:
+            liquidations = liquidations[-MAX_CANDLES_FOR_REFRESH:]
+        if tf == "1m":
+            candles = self._db.get_candles_1m(symbol, start_ms, end_ms)
+        else:
+            candles = self._db.resample_candles(symbol, start_ms, end_ms, tf)
+        if candles and len(candles) > MAX_CANDLES_FOR_REFRESH:
+            candles = candles[-MAX_CANDLES_FOR_REFRESH:]
+        if not candles and "liquidations" not in [x.get("name") for x in cls.required_inputs]:
+            return
+        liq = liquidations if any(x.get("name") == "liquidations" for x in cls.required_inputs) else None
+        try:
+            t0 = time.perf_counter()
+            inst = cls()
+            inst.parameters = cls.get_default_parameters()
+            required_ids = getattr(cls, "required_indicator_ids", None) or []
+            if required_ids:
+                indicator_series: IndicatorSeriesInput = {}
+                for dep_id in required_ids:
+                    dep_cls = self._indicator_class_by_id.get(dep_id)
+                    if dep_cls is None:
+                        logger.warning("Composite %s: missing dependency %s", indicator_id, dep_id)
+                        continue
+                    try:
+                        dep_inst = dep_cls()
+                        dep_inst.parameters = dep_cls.get_default_parameters()
+                        dep_series, _ = dep_inst.compute(candles, tf, liquidations=liq)
+                        if dep_series:
+                            indicator_series[dep_id] = dep_series
+                    except Exception as e:
+                        logger.warning("Composite %s: dependency %s failed: %s", indicator_id, dep_id, e)
+                if len(indicator_series) < len(required_ids):
+                    logger.warning("Composite %s: only %d/%d dependencies available", indicator_id, len(indicator_series), len(required_ids))
+                series, _ = inst.compute([], tf, liquidations=liq, indicator_series=indicator_series)
             else:
-                candles = self._db.resample_candles(symbol, start_ms, end_ms, tf)
-            if not candles and "liquidations" not in [x.get("name") for x in cls.required_inputs]:
-                continue
-            liq = liquidations if any(x.get("name") == "liquidations" for x in cls.required_inputs) else None
-            try:
-                inst = cls()
-                inst.parameters = cls.get_default_parameters()
-                required_ids = getattr(cls, "required_indicator_ids", None) or []
-                if required_ids:
-                    indicator_series: IndicatorSeriesInput = {}
-                    for dep_id in required_ids:
-                        dep_cls = self._indicator_class_by_id.get(dep_id)
-                        if dep_cls is None:
-                            logger.warning("Composite %s: missing dependency %s", indicator_id, dep_id)
-                            continue
-                        try:
-                            dep_inst = dep_cls()
-                            dep_inst.parameters = dep_cls.get_default_parameters()
-                            dep_series, _ = dep_inst.compute(candles, tf, liquidations=liq)
-                            if dep_series:
-                                indicator_series[dep_id] = dep_series
-                        except Exception as e:
-                            logger.warning("Composite %s: dependency %s failed: %s", indicator_id, dep_id, e)
-                    if len(indicator_series) < len(required_ids):
-                        logger.warning("Composite %s: only %d/%d dependencies available", indicator_id, len(indicator_series), len(required_ids))
-                    series, _ = inst.compute([], tf, liquidations=liq, indicator_series=indicator_series)
-                else:
-                    series, _ = inst.compute(candles, tf, liquidations=liq)
-                if series:
-                    panel.set_data(series)
-            except Exception as e:
-                logger.exception("Indicator %s failed: %s", indicator_id, e)
+                series, _ = inst.compute(candles, tf, liquidations=liq)
+            elapsed = time.perf_counter() - t0
+            print(f"[IND] {indicator_id}: {elapsed:.3f}s", flush=True)
+            if series:
+                panel.set_data(series)
+        except Exception as e:
+            logger.exception("Indicator %s failed: %s", indicator_id, e)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
