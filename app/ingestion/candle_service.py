@@ -24,6 +24,7 @@ from app.ingestion.binance_client import (
 logger = logging.getLogger(__name__)
 
 BACKFILL_DAYS = 90
+BACKFILL_INTERVALS = tuple(sorted(CANDLE_TABLES, key=lambda interval: INTERVAL_MS[interval], reverse=True))
 
 
 def _parse_start_date_ms(date_str: str) -> Optional[int]:
@@ -50,7 +51,8 @@ class CandleIngestionService:
         """
         on_progress(msg) is called from the ingestion thread. Do not touch Qt widgets
         in this callback; only log or emit a signal for the main thread to handle.
-        start_date: YYYY-MM-DD; when DB has no candles, backfill from this date. Empty = 90 days ago.
+        start_date: YYYY-MM-DD; when DB has no candles, backfill from this date.
+        Empty falls back to the service default (90 days ago) when no caller-specific range is supplied.
         """
         self._db = db
         self._symbol = symbol
@@ -70,11 +72,12 @@ class CandleIngestionService:
                 pass
 
     def _backfill_range(self, interval: str, start_ms: int, end_ms: int, limit: int = 1500) -> int:
-        """Fetch and insert candles for [start_ms, end_ms]. Returns count inserted."""
+        """Fetch and insert candles for [start_ms, end_ms], skipping empty historical gaps."""
         interval_ms = INTERVAL_MS[interval]
         step_ms = interval_ms * limit
         cursor = start_ms
         total_new = 0
+        saw_empty_gap = False
         while cursor < end_ms:
             batch_end = min(end_ms, cursor + step_ms - interval_ms)
             try:
@@ -91,7 +94,12 @@ class CandleIngestionService:
                 time.sleep(5)
                 continue
             if not klines:
-                break
+                if not saw_empty_gap:
+                    self._log(f"Backfill {interval}: no candles in some older batches yet; continuing forward...")
+                    saw_empty_gap = True
+                cursor = batch_end + interval_ms
+                continue
+            saw_empty_gap = False
             rows = [kline_row_to_dict(k) for k in klines]
             self._db.insert_candles(self._symbol, interval, rows)
             total_new += len(rows)
@@ -146,11 +154,14 @@ class CandleIngestionService:
         return total_new
 
     def _has_any_candles(self) -> bool:
-        """True if DB already has at least one candle for this symbol (5m)."""
-        return self._db.get_last_candle_time_ms(self._symbol, "5m") is not None
+        """True if DB already has at least one candle for this symbol in any stored timeframe."""
+        return any(
+            self._db.get_last_candle_time_ms(self._symbol, interval) is not None
+            for interval in CANDLE_TABLES
+        )
 
     def _backfill(self) -> None:
-        for interval in CANDLE_TABLES:
+        for interval in BACKFILL_INTERVALS:
             self._log(f"Backfilling {interval}...")
             n = self._backfill_one(interval)
             if n:

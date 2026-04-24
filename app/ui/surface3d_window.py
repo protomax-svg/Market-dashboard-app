@@ -1,8 +1,5 @@
 """
-Standalone 3D Surface window: Time × Timeframe × Metric (ER / VOV).
-- Not a dock: independent QMainWindow, no layout state save/restore.
-- DB reads only on main thread; worker receives pre-fetched candle data.
-- QWebEngineView created only after window is shown; worker stopped before close.
+Standalone 3D surface window for comparing metrics across time and timeframe.
 """
 from __future__ import annotations
 
@@ -11,20 +8,22 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
+    QCheckBox,
+    QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
-    QComboBox,
-    QCheckBox,
+    QMainWindow,
     QPushButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
+
     _HAS_WEBENGINE = True
 except Exception:
     QWebEngineView = None  # type: ignore
@@ -32,18 +31,15 @@ except Exception:
 
 try:
     import plotly.graph_objects as go
+
     _HAS_PLOTLY = True
 except Exception:
     go = None  # type: ignore
     _HAS_PLOTLY = False
 
 from app.storage.db import Database, INTERVAL_MS
-from app.ui.theme import STYLESHEET, TEXT, BG_MAIN
+from app.ui.theme import BG_MAIN, STYLESHEET, TEXT
 
-
-# ----------------------------
-# Metric implementations (no DB)
-# ----------------------------
 
 def compute_efficiency_ratio(
     candles: List[Dict[str, Any]],
@@ -51,21 +47,25 @@ def compute_efficiency_ratio(
 ) -> List[Tuple[int, float]]:
     if window < 2 or len(candles) < window + 1:
         return []
-    closes = [float(c["close"]) for c in candles]
-    times = [int(c["open_time"]) for c in candles]
+
+    closes = [float(candle["close"]) for candle in candles]
+    times = [int(candle["open_time"]) for candle in candles]
     diffs = [0.0]
-    for i in range(1, len(closes)):
-        diffs.append(abs(closes[i] - closes[i - 1]))
+
+    for index in range(1, len(closes)):
+        diffs.append(abs(closes[index] - closes[index - 1]))
+
     rolling = sum(diffs[1 : window + 1])
-    out: List[Tuple[int, float]] = []
-    for t in range(window, len(closes)):
-        if t > window:
-            rolling -= diffs[t - window + 1]
-            rolling += diffs[t]
-        net = abs(closes[t] - closes[t - window])
-        er = (net / rolling) if rolling > 0 else 0.0
-        out.append((times[t], er))
-    return out
+    output: List[Tuple[int, float]] = []
+
+    for index in range(window, len(closes)):
+        if index > window:
+            rolling -= diffs[index - window + 1]
+            rolling += diffs[index]
+        net = abs(closes[index] - closes[index - window])
+        output.append((times[index], (net / rolling) if rolling > 0 else 0.0))
+
+    return output
 
 
 def compute_vol_of_vol(
@@ -75,64 +75,62 @@ def compute_vol_of_vol(
 ) -> List[Tuple[int, float]]:
     if vol_window < 2 or vov_window < 2:
         return []
-    n = len(candles)
-    if n < (vol_window + vov_window):
+
+    candle_count = len(candles)
+    if candle_count < (vol_window + vov_window):
         return []
 
-    def tr(curr: Dict[str, Any], prev_close: float) -> float:
-        h = float(curr["high"])
-        l = float(curr["low"])
-        return max(h - l, abs(h - prev_close), abs(l - prev_close))
+    def true_range(current: Dict[str, Any], prev_close: float) -> float:
+        high = float(current["high"])
+        low = float(current["low"])
+        return max(high - low, abs(high - prev_close), abs(low - prev_close))
 
-    trs: List[float] = [0.0] * n
+    trs: List[float] = [0.0] * candle_count
     prev_close = float(candles[0].get("open", candles[0]["close"]))
-    for i in range(n):
-        trs[i] = tr(candles[i], prev_close)
-        prev_close = float(candles[i]["close"])
+    for index in range(candle_count):
+        trs[index] = true_range(candles[index], prev_close)
+        prev_close = float(candles[index]["close"])
 
     atr = sum(trs[:vol_window]) / vol_window
     atrs: List[Tuple[int, float]] = [(int(candles[vol_window - 1]["open_time"]), atr)]
-    for i in range(vol_window, n):
-        atr = ((atr * (vol_window - 1)) + trs[i]) / vol_window
-        atrs.append((int(candles[i]["open_time"]), atr))
+    for index in range(vol_window, candle_count):
+        atr = ((atr * (vol_window - 1)) + trs[index]) / vol_window
+        atrs.append((int(candles[index]["open_time"]), atr))
 
-    out: List[Tuple[int, float]] = []
-    buf: List[float] = []
-    sum_a = 0.0
+    output: List[Tuple[int, float]] = []
+    buffer: List[float] = []
+    sum_atr = 0.0
     sumsq = 0.0
-    for t, a in atrs:
-        buf.append(a)
-        sum_a += a
-        sumsq += a * a
-        if len(buf) > vov_window:
-            old = buf.pop(0)
-            sum_a -= old
+
+    for timestamp, atr_value in atrs:
+        buffer.append(atr_value)
+        sum_atr += atr_value
+        sumsq += atr_value * atr_value
+        if len(buffer) > vov_window:
+            old = buffer.pop(0)
+            sum_atr -= old
             sumsq -= old * old
-        if len(buf) == vov_window:
-            mean = sum_a / vov_window
-            var = (sumsq / vov_window) - mean * mean
-            vov = math.sqrt(var) if var > 0 else 0.0
-            out.append((t, vov))
-    return out
+        if len(buffer) == vov_window:
+            mean = sum_atr / vov_window
+            variance = (sumsq / vov_window) - mean * mean
+            output.append((timestamp, math.sqrt(variance) if variance > 0 else 0.0))
+
+    return output
 
 
 def zscore_series(points: List[Tuple[int, float]]) -> List[Tuple[int, float]]:
     if not points:
         return []
-    vals = [v for _, v in points]
-    mean = sum(vals) / len(vals)
-    var = sum((v - mean) ** 2 for v in vals) / max(1, len(vals))
-    std = math.sqrt(var) if var > 1e-12 else 1.0
-    return [(t, (v - mean) / std) for t, v in points]
 
+    values = [value for _, value in points]
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / max(1, len(values))
+    std = math.sqrt(variance) if variance > 1e-12 else 1.0
+    return [(timestamp, (value - mean) / std) for timestamp, value in points]
 
-# ----------------------------
-# Worker: receives pre-fetched data only (no DB access)
-# ----------------------------
 
 @dataclass
 class SurfaceInput:
-    """Pre-fetched candle data and options. No DB reference."""
     symbol: str
     timeframes: List[str]
     metric: str
@@ -141,53 +139,51 @@ class SurfaceInput:
 
 
 def build_surface_html_from_candles(inp: SurfaceInput) -> str:
-    """Build Plotly HTML from pre-fetched candles. No DB access."""
     if not _HAS_PLOTLY or go is None:
-        raise RuntimeError("plotly is not installed. pip install plotly")
-    tf_series: Dict[str, List[Tuple[int, float]]] = {}
+        raise RuntimeError("plotly is not installed. Install plotly to use the 3D view.")
 
-    for tf in inp.timeframes:
-        candles = inp.tf_candles.get(tf, [])
+    tf_series: Dict[str, List[Tuple[int, float]]] = {}
+    for timeframe in inp.timeframes:
+        candles = inp.tf_candles.get(timeframe, [])
         if inp.metric == "ER":
-            pts = compute_efficiency_ratio(candles, window=50)
+            points = compute_efficiency_ratio(candles, window=50)
         elif inp.metric == "VOV":
-            pts = compute_vol_of_vol(candles, vol_window=20, vov_window=30)
+            points = compute_vol_of_vol(candles, vol_window=20, vov_window=30)
         else:
-            pts = compute_efficiency_ratio(candles, window=50)
-        if inp.normalize:
-            pts = zscore_series(pts)
-        tf_series[tf] = pts
+            points = compute_efficiency_ratio(candles, window=50)
+
+        tf_series[timeframe] = zscore_series(points) if inp.normalize else points
 
     if not tf_series:
         raise ValueError("No series computed")
 
-    base_tf = min(inp.timeframes, key=lambda x: INTERVAL_MS.get(x, 0))
+    base_tf = min(inp.timeframes, key=lambda value: INTERVAL_MS.get(value, 0))
     base_points = tf_series.get(base_tf, [])
     if len(base_points) < 3:
-        raise ValueError("Not enough data in selected range for surface")
+        raise ValueError("Not enough data in the selected range for a surface")
 
-    x_times = [t for t, _ in base_points]
+    x_times = [timestamp for timestamp, _ in base_points]
     y_tfs = inp.timeframes[:]
-    z: List[List[float]] = []
+    z_values: List[List[float]] = []
 
-    for tf in y_tfs:
-        pts = tf_series.get(tf, [])
+    for timeframe in y_tfs:
+        points = tf_series.get(timeframe, [])
         row: List[float] = []
-        j = 0
-        last_val: Optional[float] = None
-        for xt in x_times:
-            while j < len(pts) and pts[j][0] <= xt:
-                last_val = pts[j][1]
-                j += 1
-            row.append(last_val if last_val is not None else float("nan"))
-        z.append(row)
+        cursor = 0
+        last_value: Optional[float] = None
+        for x_time in x_times:
+            while cursor < len(points) and points[cursor][0] <= x_time:
+                last_value = points[cursor][1]
+                cursor += 1
+            row.append(last_value if last_value is not None else float("nan"))
+        z_values.append(row)
 
-    x_labels = [time.strftime("%H:%M", time.gmtime(t / 1000)) for t in x_times]
+    x_labels = [time.strftime("%H:%M", time.gmtime(timestamp / 1000)) for timestamp in x_times]
 
     fig = go.Figure(
         data=[
             go.Surface(
-                z=z,
+                z=z_values,
                 x=x_labels,
                 y=y_tfs,
                 showscale=True,
@@ -195,7 +191,7 @@ def build_surface_html_from_candles(inp: SurfaceInput) -> str:
         ]
     )
     fig.update_layout(
-        title=f"3D Surface • {inp.symbol} • {inp.metric}{' (z)' if inp.normalize else ''}",
+        title=f"3D Surface | {inp.symbol} | {inp.metric}{' (z)' if inp.normalize else ''}",
         scene=dict(
             xaxis_title="Time",
             yaxis_title="Timeframe",
@@ -221,25 +217,14 @@ class SurfaceWorker(QObject):
         try:
             html = build_surface_html_from_candles(self._inp)
             self.surface_ready.emit(html)
-        except Exception as e:
-            self.error.emit(f"{type(e).__name__}: {e}")
+        except Exception as exc:
+            self.error.emit(f"{type(exc).__name__}: {exc}")
 
-
-# ----------------------------
-# Standalone window
-# ----------------------------
 
 DEBOUNCE_MS = 400
 
 
 class Surface3DWindow(QMainWindow):
-    """
-    Standalone 3D surface window. Not a dock.
-    - QWebEngineView created only in showEvent (after window is shown).
-    - DB reads happen on main thread; worker only receives pre-fetched data.
-    - closeEvent stops worker before closing; no deleteLater on view while active.
-    """
-
     def __init__(
         self,
         db: Database,
@@ -251,8 +236,7 @@ class Surface3DWindow(QMainWindow):
         self.setWindowTitle("Vol Stability (3D)")
         self.setStyleSheet(STYLESHEET)
         self.setMinimumSize(640, 480)
-        self.resize(900, 600)
-        # Top-level window: movable, resizable, with title bar and min/max/close
+        self.resize(960, 640)
         self.setWindowFlags(
             Qt.WindowType.Window
             | Qt.WindowType.WindowTitleHint
@@ -264,19 +248,43 @@ class Surface3DWindow(QMainWindow):
         self._db = db
         self._symbol = symbol
         self._lookback_hours = lookback_hours
-        self._view: Optional[Any] = None  # QWebEngineView created in showEvent
+        self._view: Optional[Any] = None
         self._view_placeholder: Optional[QWidget] = None
         self._thread: Optional[QThread] = None
         self._worker: Optional[SurfaceWorker] = None
-        self._debounce_timer: Optional[QTimer] = None
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.timeout.connect(self._request_refresh)
         self._closed = False
 
         root = QWidget(self)
+        root.setObjectName("SurfaceRoot")
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        header = QFrame(self)
+        header.setObjectName("ChartCard")
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(16, 16, 16, 16)
+        header_layout.setSpacing(10)
+
+        title = QLabel("Vol Stability Surface", header)
+        title.setObjectName("ChartTitle")
+        header_layout.addWidget(title)
+
+        subtitle = QLabel(
+            "Compare efficiency ratio and volatility-of-volatility across multiple timeframes.",
+            header,
+        )
+        subtitle.setObjectName("ChartMeta")
+        subtitle.setWordWrap(True)
+        header_layout.addWidget(subtitle)
 
         controls = QHBoxLayout()
-        layout.addLayout(controls)
+        controls.setSpacing(10)
+        header_layout.addLayout(controls)
 
         controls.addWidget(QLabel("Metric:"))
         self.metric_box = QComboBox()
@@ -294,57 +302,66 @@ class Surface3DWindow(QMainWindow):
         self.tf_15m.setChecked(True)
         self.tf_1h = QCheckBox("1h")
         self.tf_1h.setChecked(True)
-        for cb in (self.tf_5m, self.tf_15m, self.tf_1h):
-            controls.addWidget(cb)
+        for checkbox in (self.tf_5m, self.tf_15m, self.tf_1h):
+            controls.addWidget(checkbox)
 
         self.refresh_btn = QPushButton("Refresh")
         controls.addWidget(self.refresh_btn)
         controls.addStretch(1)
 
-        # Placeholder for view (replaced by QWebEngineView in showEvent)
-        self._view_placeholder = QWidget()
-        self._view_placeholder.setMinimumSize(400, 300)
+        layout.addWidget(header)
+
+        self._view_placeholder = QFrame(self)
+        self._view_placeholder.setObjectName("ChartCard")
+        placeholder_layout = QVBoxLayout(self._view_placeholder)
+        placeholder_layout.setContentsMargins(18, 18, 18, 18)
+        placeholder = QLabel(
+            "The interactive surface will appear here after the window finishes loading.",
+            self._view_placeholder,
+        )
+        placeholder.setObjectName("ChartStatus")
+        placeholder.setWordWrap(True)
+        placeholder_layout.addWidget(placeholder)
+        placeholder_layout.addStretch(1)
         layout.addWidget(self._view_placeholder, 1)
 
-        self.status = QLabel("")
+        self.status = QLabel("Choose a metric and click Refresh.", self)
+        self.status.setObjectName("ChartMeta")
         layout.addWidget(self.status)
 
         self.refresh_btn.clicked.connect(self._on_refresh_clicked)
         self.metric_box.currentIndexChanged.connect(self._schedule_refresh)
         self.norm_box.stateChanged.connect(self._schedule_refresh)
-        for cb in (self.tf_5m, self.tf_15m, self.tf_1h):
-            cb.stateChanged.connect(self._schedule_refresh)
-
-        # No auto-run in __init__; start after show or on Refresh
+        for checkbox in (self.tf_5m, self.tf_15m, self.tf_1h):
+            checkbox.stateChanged.connect(self._schedule_refresh)
 
     def _selected_timeframes(self) -> List[str]:
-        tfs: List[str] = []
+        timeframes: List[str] = []
         if self.tf_5m.isChecked():
-            tfs.append("5m")
+            timeframes.append("5m")
         if self.tf_15m.isChecked():
-            tfs.append("15m")
+            timeframes.append("15m")
         if self.tf_1h.isChecked():
-            tfs.append("1h")
-        return tfs
+            timeframes.append("1h")
+        return timeframes
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        if self._view is None and _HAS_WEBENGINE and QWebEngineView is not None and self._view_placeholder is not None:
+        if (
+            self._view is None
+            and _HAS_WEBENGINE
+            and QWebEngineView is not None
+            and self._view_placeholder is not None
+        ):
             self._view = QWebEngineView(self)
-            layout = self.centralWidget().layout()
+            layout = self.centralWidget().layout() if self.centralWidget() is not None else None
             if layout is not None:
                 layout.replaceWidget(self._view_placeholder, self._view)
             self._view_placeholder.setParent(None)
             self._view_placeholder = None
             QTimer.singleShot(100, self._request_refresh)
-        event.accept()
 
     def _schedule_refresh(self) -> None:
-        if self._debounce_timer is not None:
-            self._debounce_timer.stop()
-        self._debounce_timer = QTimer(self)
-        self._debounce_timer.setSingleShot(True)
-        self._debounce_timer.timeout.connect(self._request_refresh)
         self._debounce_timer.start(DEBOUNCE_MS)
 
     def _on_refresh_clicked(self) -> None:
@@ -353,39 +370,38 @@ class Surface3DWindow(QMainWindow):
     def _request_refresh(self) -> None:
         if self._closed:
             return
+
         if not _HAS_WEBENGINE or self._view is None:
-            if self._view is None and not _HAS_WEBENGINE:
-                self.status.setText("Install PySide6-WebEngine and plotly for 3D chart.")
+            if not _HAS_WEBENGINE:
+                self.status.setText("Install PySide6 and plotly to use the 3D chart.")
             return
 
         self._stop_worker()
 
-        # Fetch candles on main thread (no DB access from worker)
         end_ms = int(time.time() * 1000)
         start_ms = end_ms - int(self._lookback_hours * 3600 * 1000)
-        tfs = self._selected_timeframes()
-        if not tfs:
+        timeframes = self._selected_timeframes()
+        if not timeframes:
             self.status.setText("Select at least one timeframe.")
             return
 
         tf_candles: Dict[str, List[Dict[str, Any]]] = {}
-        for tf in tfs:
-            candles = self._db.get_candles(self._symbol, tf, start_ms, end_ms)
-            tf_candles[tf] = candles
+        for timeframe in timeframes:
+            tf_candles[timeframe] = self._db.get_candles(self._symbol, timeframe, start_ms, end_ms)
 
-        inp = SurfaceInput(
+        worker_input = SurfaceInput(
             symbol=self._symbol,
-            timeframes=tfs,
+            timeframes=timeframes,
             metric=str(self.metric_box.currentText()),
             normalize=bool(self.norm_box.isChecked()),
             tf_candles=tf_candles,
         )
 
-        self.status.setText("Building surface…")
+        self.status.setText("Building surface...")
         self.refresh_btn.setEnabled(False)
 
         self._thread = QThread()
-        self._worker = SurfaceWorker(inp)
+        self._worker = SurfaceWorker(worker_input)
         self._worker.moveToThread(self._thread)
 
         self._thread.started.connect(self._worker.run)
@@ -399,15 +415,20 @@ class Surface3DWindow(QMainWindow):
     def _stop_worker(self) -> None:
         if self._thread is not None:
             self._thread.quit()
-            # Short wait in close path to avoid blocking; worker has no DB/view refs
             self._thread.wait(300)
+            self._thread.deleteLater()
             self._thread = None
+        if self._worker is not None:
+            self._worker.deleteLater()
             self._worker = None
 
     def _cleanup_worker(self) -> None:
         if self._thread is not None:
             self._thread.quit()
             self._thread.wait(2000)
+            self._thread.deleteLater()
+        if self._worker is not None:
+            self._worker.deleteLater()
         self._thread = None
         self._worker = None
         self.refresh_btn.setEnabled(True)
@@ -424,14 +445,9 @@ class Surface3DWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._closed = True
-        # Stop worker with short wait so we don't block the close path
         self._stop_worker()
-        if self._debounce_timer is not None:
-            self._debounce_timer.stop()
-            self._debounce_timer = None
-        # Detach QWebEngineView before the window is destroyed. Destroying the view
-        # while the window is closing (same event path) causes crashes on Windows.
-        # Remove from layout, orphan it, and deleteLater after a delay.
+        self._debounce_timer.stop()
+
         if self._view is not None:
             layout = self.centralWidget().layout() if self.centralWidget() else None
             if layout is not None:
@@ -441,7 +457,16 @@ class Surface3DWindow(QMainWindow):
             view_to_delete = self._view
             self._view = None
             QTimer.singleShot(600, view_to_delete.deleteLater)
+
         super().closeEvent(event)
 
     def set_lookback_hours(self, hours: int) -> None:
         self._lookback_hours = hours
+        if self.isVisible():
+            self._schedule_refresh()
+
+    def set_context(self, db: Database, symbol: str) -> None:
+        self._db = db
+        self._symbol = symbol
+        if self.isVisible():
+            self._schedule_refresh()

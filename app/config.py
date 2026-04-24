@@ -12,7 +12,6 @@ DEFAULT_CONFIG_PATH = os.path.join(DEFAULT_STORAGE_PATH, "config.json")
 
 DEFAULTS = {
     "symbol": "BTCUSDT",
-    "timeframes_enabled": ["5m"],
     "storage_path": DEFAULT_STORAGE_PATH,
     "retention_mode": "days",  # "days" | "size_gb"
     "retention_days": 90,
@@ -20,8 +19,13 @@ DEFAULTS = {
     "ngrok_liquidations_url": "",
     "liquidations_reconnect_delay_sec": 5,
     "candle_poll_interval_sec": 60,
-    "candle_start_date": "",  # YYYY-MM-DD: download candles from this date to now (empty = 90 days ago)
+    "candle_start_date": "",  # YYYY-MM-DD: download candles from this date to now (empty = app-selected auto history window)
     "date_range_days": 90,
+    "regime_highlight_low": 0.35,
+    "regime_highlight_high": 0.65,
+    "balanced_regime_highlight_low": 0.35,
+    "balanced_regime_highlight_high": 0.65,
+    "show_balanced_regime_panel": True,
 }
 
 

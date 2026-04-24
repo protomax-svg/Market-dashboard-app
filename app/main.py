@@ -5,14 +5,11 @@ import logging
 import os
 import sys
 
-# Reduce QtWebEngine/Chromium GPU errors (e.g. IDCompositionDevice4 / DirectComposition on Windows)
-# Set before importing PySide6 so WebEngine picks it up.
+# Reduce QtWebEngine/Chromium GPU errors on Windows.
 if "QTWEBENGINE_CHROMIUM_FLAGS" not in os.environ:
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --disable-gpu-compositing"
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
 
 from app.ui.main_window import MainWindow
 from app.ui.theme import STYLESHEET
@@ -21,26 +18,24 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+logger = logging.getLogger(__name__)
 
 
 def main() -> int:
-    print("MarketMetrics: starting...", flush=True)
+    logger.info("Starting MarketMetrics")
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
     app.setApplicationName("MarketMetrics")
     app.setOrganizationName("MarketMetrics")
+    app.setQuitOnLastWindowClosed(True)
     try:
-        print("MarketMetrics: creating main window...", flush=True)
         win = MainWindow()
-        print("MarketMetrics: showing window...", flush=True)
         win.show()
         win.raise_()
         win.activateWindow()
-        print("MarketMetrics: entering event loop.", flush=True)
         return app.exec()
-    except Exception as e:
-        logging.exception("Launch failed: %s", e)
-        print(f"MarketMetrics: ERROR {e}", flush=True)
+    except Exception:
+        logger.exception("Launch failed")
         raise
 
 

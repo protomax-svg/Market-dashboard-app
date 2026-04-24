@@ -1,17 +1,14 @@
 """
-DateRange: how much history to display (days). Does not change stored data.
+Date range dialog: controls how much history the charts display.
 """
-from typing import Optional
-
 from PySide6.QtWidgets import (
     QDialog,
-    QVBoxLayout,
+    QDialogButtonBox,
     QFormLayout,
+    QLabel,
     QSpinBox,
-    QPushButton,
-    QHBoxLayout,
+    QVBoxLayout,
 )
-from PySide6.QtCore import Qt
 
 from app.ui.theme import STYLESHEET
 
@@ -21,24 +18,32 @@ class DateRangeDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Date Range")
         self.setStyleSheet(STYLESHEET)
-        self._days = current_days
+        self.setMinimumWidth(420)
+
         layout = QVBoxLayout(self)
-        fl = QFormLayout()
+
+        hint = QLabel(
+            "This changes the visible history window for the charts. Stored data on disk is not deleted."
+        )
+        hint.setObjectName("DialogHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        form = QFormLayout()
         self.days_spin = QSpinBox()
-        self.days_spin.setRange(1, 36500)  # no practical cap (e.g. 100 years)
+        self.days_spin.setRange(1, 36500)
         self.days_spin.setValue(current_days)
         self.days_spin.setSuffix(" days")
-        fl.addRow("Display history:", self.days_spin)
-        layout.addLayout(fl)
-        btns = QHBoxLayout()
-        btns.addStretch()
-        ok = QPushButton("OK")
-        ok.clicked.connect(self.accept)
-        cancel = QPushButton("Cancel")
-        cancel.clicked.connect(self.reject)
-        btns.addWidget(ok)
-        btns.addWidget(cancel)
-        layout.addLayout(btns)
+        form.addRow("Display history", self.days_spin)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
     def get_days(self) -> int:
         return self.days_spin.value()

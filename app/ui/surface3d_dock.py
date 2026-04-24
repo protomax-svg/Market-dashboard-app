@@ -283,7 +283,7 @@ class Surface3DDock(QDockWidget):
             layout.addWidget(self.view, 1)
         else:
             self.view = None
-            layout.addWidget(QLabel("Install PySide6-WebEngine and plotly for 3D chart."))
+            layout.addWidget(QLabel("Install PySide6 and plotly for 3D chart."))
 
         self.status = QLabel("")
         layout.addWidget(self.status)

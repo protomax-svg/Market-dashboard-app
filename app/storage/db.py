@@ -108,25 +108,31 @@ class Database:
         if not rows:
             return
         table = self._candle_table(timeframe)
+        payload = [
+            (
+                symbol,
+                row["open_time"],
+                row.get("open"),
+                row.get("high"),
+                row.get("low"),
+                row.get("close"),
+                row.get("volume"),
+            )
+            for row in rows
+        ]
         with self._lock:
             with self._conn() as c:
-                for r in rows:
-                    c.execute(
-                        f"""INSERT OR REPLACE INTO {table}
-                           (symbol, open_time, open, high, low, close, volume)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            symbol,
-                            r["open_time"],
-                            r.get("open"), r.get("high"), r.get("low"),
-                            r.get("close"), r.get("volume"),
-                        ),
-                    )
+                c.executemany(
+                    f"""INSERT OR REPLACE INTO {table}
+                       (symbol, open_time, open, high, low, close, volume)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    payload,
+                )
                 c.commit()
 
     def insert_candles_1m(self, symbol: str, rows: List[Dict[str, Any]]) -> None:
-        """Legacy: insert into 1m table. Prefer insert_candles(symbol, '1m', rows)."""
-        self.insert_candles(symbol, "1m", rows)
+        """Legacy helper kept for compatibility with older callers."""
+        raise ValueError("1m candle storage is no longer supported. Use 5m, 15m, or 1h candles.")
 
     def get_candles(
         self,
@@ -167,8 +173,8 @@ class Database:
         end_ms: int,
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Legacy: get 1m candles. Prefer get_candles(symbol, '1m', start_ms, end_ms)."""
-        return self.get_candles(symbol, "1m", start_ms, end_ms, limit=limit)
+        """Legacy helper kept for compatibility with older callers."""
+        raise ValueError("1m candle storage is no longer supported. Use 5m, 15m, or 1h candles.")
 
     def resample_candles(
         self,
